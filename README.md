@@ -1,6 +1,7 @@
 # USB Camera Lab
 Initial Android USB camera prototype. Connect explicitly and approve Camera + USB access.
-Local preview, device information, and capability-gated brightness/contrast controls.
+Local preview, device information, and every UVC control the camera reports (image, white balance, exposure,
+focus/zoom/pan/tilt, anti-flicker, ...) with auto toggles and Reset all. English UI.
 No recording, microphone use, internet permission, or background capture.
 Camera closes when the activity leaves the foreground; tap Connect to resume.
 Rotation keeps the stream running (the activity handles configuration changes; landscape puts controls beside the preview).
