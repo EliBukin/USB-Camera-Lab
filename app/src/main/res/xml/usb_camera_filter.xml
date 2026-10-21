@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Any USB device with a video-class interface (UVC). Android matches the device class and each interface's class. -->
+<resources>
+    <usb-device class="14"/>
+</resources>

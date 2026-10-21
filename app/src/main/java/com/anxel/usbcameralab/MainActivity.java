@@ -11,6 +11,7 @@ import android.content.res.Configuration;
 import android.graphics.Typeface;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.SystemClock;
@@ -29,11 +30,13 @@ import java.util.Map;
 // English-only UI built in code (no string resources), with framework widgets on a framework theme (no AppCompat).
 @SuppressLint({"SetTextI18n","UseSwitchCompatOrMaterialCode"})
 public class MainActivity extends Activity {
+    // The camera connects by itself while the app is on screen (on start, and when a camera is plugged in) and stops when
+    // the app leaves the screen or the camera is unplugged. After a failure the user decides: Try again, or replug.
     // CLOSING: closing an opened camera also closes its USB device (UVCCamera.close), and that onDeviceClose arrives
-    // a moment later. Connect stays disabled until then, so the late event can't land on the next attempt.
+    // a moment later. Retrying waits until then, so the late event can't land on the next attempt.
     private enum State { IDLE, CONNECTING, OPEN, CLOSING }
     private static final String IDLE_DETAILS = "Local preview • no recording";
-    private static final String DISCONNECTED = "Disconnected — tap Connect to start";
+    private static final String NO_CAMERA = "Plug in a USB camera";
     private static final int TEXT = 0xffe8eff5, MUTED = 0xff9aa8b4, ACCENT = 0xff7fc4e0;
     // One CameraHelper per foreground session (onStart..onStop); events from a released helper are ignored.
     private CameraHelper helper;
@@ -41,8 +44,10 @@ public class MainActivity extends Activity {
     // The USB device is already open in this helper: reconnect with openCamera(). Calling selectDevice() on an
     // open device makes UVCAndroid register its camera callbacks again, so every later event arrives twice.
     private boolean deviceOpen;
-    private boolean cameraRequested; // openCamera() was posted in the current attempt
+    private boolean waitForUser; // last attempt failed or was declined: no automatic retry until Try again, a replug or onStart
+    private boolean askingPermission; // camera permission dialog is up
     private String closingMessage;
+    private UsbManager usb;
     private UsbDevice selected;
     private UVCControl control;
     private final List<Row> rows = new ArrayList<>();
@@ -54,26 +59,23 @@ public class MainActivity extends Activity {
     private SurfaceView preview;
     private double aspect = 4.0/3.0;
     private TextView status, details;
-    private Button connect, stop, settings;
+    private Button action; // the one button, shown only when the user has to act
     private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
         UVCUtils.init(getApplication());
+        usb=(UsbManager)getSystemService(USB_SERVICE);
         root=new LinearLayout(this); root.setPadding(dp(12),dp(12),dp(12),dp(8)); root.setBackgroundColor(0xff101820);
         header=new LinearLayout(this); header.setOrientation(LinearLayout.VERTICAL);
         header.addView(text("USB Camera Lab",22));
-        status=text("Connect a USB camera and tap Connect",15); header.addView(status);
-        settings=new Button(this); settings.setText("Open app settings"); settings.setVisibility(View.GONE); header.addView(settings,new LinearLayout.LayoutParams(-2,-2));
-        settings.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.fromParts("package",getPackageName(),null))));
+        status=text(NO_CAMERA,15); header.addView(status);
+        action=new Button(this); action.setVisibility(View.GONE); header.addView(action,new LinearLayout.LayoutParams(-2,-2));
         previewBox=new FrameLayout(this);
         preview=new SurfaceView(this); previewBox.addView(preview,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
         previewBox.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,orr,ob) -> fitPreview());
         panel=new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL);
         details=text(IDLE_DETAILS,14); panel.addView(details);
-        LinearLayout buttons=new LinearLayout(this); panel.addView(buttons);
-        connect=new Button(this); connect.setText("Connect"); buttons.addView(connect); connect.setOnClickListener(v -> connect());
-        stop=new Button(this); stop.setText("Disconnect"); buttons.addView(stop); stop.setOnClickListener(v -> disconnect());
         controls=new LinearLayout(this); controls.setOrientation(LinearLayout.VERTICAL);
         ScrollView scroll=new ScrollView(this); scroll.addView(controls,new FrameLayout.LayoutParams(-1,-2));
         panel.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
@@ -119,40 +121,64 @@ public class MainActivity extends Activity {
     private boolean video(UsbDevice d) { for(int i=0;i<d.getInterfaceCount();i++) if(d.getInterface(i).getInterfaceClass()==UsbConstants.USB_CLASS_VIDEO) return true; return false; }
     private void setState(State next) {
         state=next; android.util.Log.i("UsbCameraLab","state "+next);
-        connect.setEnabled(next==State.IDLE); stop.setEnabled(next==State.CONNECTING || next==State.OPEN);
         if(next==State.OPEN) { getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); return; }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        if(next!=State.CONNECTING) cameraRequested=false;
         ui.removeCallbacksAndMessages(null); writeQueued=false; pendingWrites.clear();
         control=null; rows.clear(); controls.removeAllViews(); details.setText(IDLE_DETAILS);
     }
-    private void connect() {
-        if(state!=State.IDLE || helper==null) return;
-        if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED) { requestPermissions(new String[]{Manifest.permission.CAMERA},1); return; }
-        settings.setVisibility(View.GONE);
-        if(deviceOpen && selected!=null) { setState(State.CONNECTING); say("Opening camera…"); cameraRequested=true; helper.openCamera(); return; }
-        List<UsbDevice> devices=helper.getDeviceList();
-        if(devices!=null) for(UsbDevice d:devices) if(video(d)) { selected=d; setState(State.CONNECTING); say("Requesting camera access…"); helper.selectDevice(d); return; }
-        say(devices==null || devices.isEmpty() ? "No camera found. Check the cable and try again." : "No USB video device found");
+    private UsbDevice findCamera() {
+        List<UsbDevice> devices=helper==null?null:helper.getDeviceList();
+        if(devices!=null) for(UsbDevice d:devices) if(video(d)) return d;
+        return null;
     }
+    private void connect() {
+        if(state!=State.IDLE || helper==null || askingPermission) return;
+        UsbDevice d=deviceOpen && selected!=null ? selected : findCamera();
+        if(d==null) { hideAction(); say(NO_CAMERA); return; }
+        if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED) { askingPermission=true; requestPermissions(new String[]{Manifest.permission.CAMERA},1); return; }
+        waitForUser=false; hideAction();
+        if(deviceOpen && selected!=null) { setState(State.CONNECTING); say("Opening camera…"); helper.openCamera(); return; }
+        selected=d; setState(State.CONNECTING);
+        say(usb.hasPermission(d)?"Connecting…":"Allow USB access to the camera…");
+        helper.selectDevice(d);
+    }
+    // The user has to act: show why, and the one button that helps.
+    private void needUser(String message) { waitForUser=true; say(message); showAction("Try again",this::retry); }
+    private void retry() { waitForUser=false; connect(); }
+    private void showAction(String label,Runnable onTap) { action.setText(label); action.setOnClickListener(v -> onTap.run()); action.setVisibility(View.VISIBLE); }
+    private void hideAction() { action.setVisibility(View.GONE); }
     @Override public void onRequestPermissionsResult(int request,String[] permissions,int[] results) {
         super.onRequestPermissionsResult(request,permissions,results);
         if(request!=1) return;
+        askingPermission=false;
         if(results.length>0 && results[0]==PackageManager.PERMISSION_GRANTED) { connect(); return; }
         // Denied with no rationale: Android won't show the dialog again (or it was dismissed), so offer the app's settings page.
-        boolean blocked=results.length>0 && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA);
-        settings.setVisibility(blocked?View.VISIBLE:View.GONE);
-        say(blocked?"Camera permission needed. If no prompt appears, allow it in app settings.":"Camera permission is required to show video");
+        if(results.length>0 && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
+            waitForUser=true; say("Camera permission is off. Allow it in app settings to see the camera.");
+            showAction("Open app settings",() -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.fromParts("package",getPackageName(),null))));
+        } else needUser("Camera permission is needed to show the camera.");
+    }
+    // Android's USB attach dialog ("Open USB Camera Lab?") granted access and handed the camera to us.
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent); setIntent(intent);
+        if(UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())) retry();
     }
     private final class Events implements ICameraHelper.StateCallback {
         private final CameraHelper owner;
         Events(CameraHelper owner) { this.owner=owner; }
         private boolean stale() { return owner!=helper; }
-        public void onAttach(UsbDevice d) { if(!stale() && state==State.IDLE && video(d) && settings.getVisibility()!=View.VISIBLE) say("Camera available — tap Connect"); }
+        // Also called again when a device gains USB permission, e.g. after Android's attach dialog.
+        public void onAttach(UsbDevice d) {
+            if(stale() || !video(d) || state!=State.IDLE || waitForUser || askingPermission) return;
+            if(usb.hasPermission(d)) { connect(); return; }
+            // Newly plugged in: Android's attach dialog (manifest USB filter) asks for access; asking too would stack two dialogs.
+            say("Camera plugged in. Allow access in Android's dialog.");
+            showAction("Try again",MainActivity.this::retry);
+        }
         public void onDeviceOpen(UsbDevice d,boolean first) {
             if(stale()) return;
             deviceOpen=true; selected=d;
-            if(state==State.CONNECTING) { say("Opening camera…"); cameraRequested=true; owner.openCamera(); }
+            if(state==State.CONNECTING) { say("Opening camera…"); owner.openCamera(); }
         }
         public void onCameraOpen(UsbDevice d) {
             if(stale()) return;
@@ -170,24 +196,24 @@ public class MainActivity extends Activity {
         public void onCameraClose(UsbDevice d) {
             if(stale()) return;
             deviceOpen=false;
-            if(state==State.OPEN) closing("Camera closed — tap Connect");
+            if(state==State.OPEN) closing("The camera stopped.");
         }
         public void onDeviceClose(UsbDevice d) {
             if(stale()) return;
             deviceOpen=false;
-            if(state==State.CLOSING) { setState(State.IDLE); say(closingMessage); }
-            else if(state!=State.IDLE) { setState(State.IDLE); say("Camera connection closed"); }
+            if(state==State.CLOSING) { setState(State.IDLE); needUser(closingMessage); }
+            else if(state!=State.IDLE) { setState(State.IDLE); needUser("Lost the camera connection."); }
         }
         public void onDetach(UsbDevice d) {
             if(stale()) return;
             boolean ours=selected!=null && selected.equals(d);
             if(ours) { deviceOpen=false; selected=null; if(state!=State.IDLE) setState(State.IDLE); }
-            if(ours || (state==State.IDLE && video(d))) say("Camera unplugged. Plug it back in and tap Connect.");
+            if(ours || (state==State.IDLE && video(d))) { waitForUser=false; hideAction(); say("Camera unplugged. Plug it back in to continue."); }
         }
-        public void onCancel(UsbDevice d) { if(!stale() && state==State.CONNECTING) { setState(State.IDLE); say("Camera access was not granted. You can try again."); } }
+        public void onCancel(UsbDevice d) { if(!stale() && state==State.CONNECTING) { setState(State.IDLE); needUser("USB access to the camera was not allowed."); } }
         public void onError(UsbDevice d,CameraException e) {
             android.util.Log.e("UsbCameraLab","Camera error",e);
-            if(!stale() && state!=State.IDLE) { deviceOpen=false; setState(State.IDLE); say("Couldn't open the camera. Unplug it and plug it back in."); }
+            if(!stale() && state!=State.IDLE) { deviceOpen=false; setState(State.IDLE); needUser("Couldn't open the camera. Try again, or unplug it and plug it back in."); }
         }
     }
     private void fitPreview() {
@@ -361,26 +387,21 @@ public class MainActivity extends Activity {
         if(state==State.OPEN && control!=null) for(Map.Entry<Row,Integer> e:pendingWrites.entrySet()) e.getKey().spec.set.set(control,e.getValue());
         pendingWrites.clear();
     };
-    private void disconnect() {
-        if((state!=State.CONNECTING && state!=State.OPEN) || helper==null) return;
-        boolean deviceCloses=state==State.OPEN || cameraRequested;
-        helper.stopPreview(); helper.closeCamera();
-        if(deviceCloses) closing(DISCONNECTED); else { setState(State.IDLE); say(DISCONNECTED); }
-    }
     private void closing(String message) {
-        setState(State.CLOSING); closingMessage=message; say("Disconnecting…");
-        ui.postDelayed(() -> { if(state==State.CLOSING) { setState(State.IDLE); say(closingMessage); } },3000); // fallback if onDeviceClose never comes
+        setState(State.CLOSING); closingMessage=message; say("Closing…");
+        ui.postDelayed(() -> { if(state==State.CLOSING) { setState(State.IDLE); needUser(closingMessage); } },3000); // fallback if onDeviceClose never comes
     }
     @Override protected void onStart() {
         super.onStart();
         helper=new CameraHelper(); helper.setStateCallback(new Events(helper));
-        if(settings.getVisibility()==View.VISIBLE && checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED) { settings.setVisibility(View.GONE); say("Camera permission granted — tap Connect"); }
+        waitForUser=false; hideAction();
+        connect(); // a camera that is already plugged in; later ones arrive through onAttach
     }
     @Override protected void onStop() {
         // release() closes the camera and the USB device. Don't call setStateCallback(null) first: that drops the
         // USB monitor, and release() could no longer close the device.
         if(helper!=null) { helper.release(); helper=null; }
-        if(state!=State.IDLE) { setState(State.IDLE); say(DISCONNECTED); }
+        if(state!=State.IDLE) setState(State.IDLE);
         deviceOpen=false; selected=null;
         super.onStop();
     }
