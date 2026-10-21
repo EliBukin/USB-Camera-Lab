@@ -4,8 +4,17 @@ Local preview, device information, and every UVC control the camera reports (ima
 focus/zoom/pan/tilt, anti-flicker, ...) with auto toggles and Reset all. English UI.
 Photos: the shutter over the preview (bottom in portrait, right edge in landscape, also in full screen) saves a JPEG
 (quality 95) at the current camera mode, e.g. 3840 × 2160 or 1920 × 1080, to Pictures/USB Camera Lab as
-USBCam_yyyyMMdd_HHmmss.jpg through MediaStore, with no storage permission. The thumbnail opens the last photo in Gallery.
-No video recording, microphone use, internet permission, or background capture.
+USBCam_yyyyMMdd_HHmmss.jpg through MediaStore, with no storage permission. The thumbnail opens the last photo or video.
+Video: switch the bar to VIDEO; the red button records H.264 MP4 to Movies/USB Camera Lab as USBCam_yyyyMMdd_HHmmss.mp4
+(a pending MediaStore row until finished; deleted if no frame arrived). The stream is GPU-scaled into 1920 × 1080, the A20's
+encoder limit (4K → 1920 × 1080, 2592 × 1944 → 1440 × 1080), at the stream's frame rate, ~0.2 bit per pixel per frame.
+Sound: the microphone permission is asked at the first recording (denied: silent videos, and the recording says so).
+The camera's own USB mic is used when Android lists it, else the phone's; a USB mic that sends only silence for 2 s is
+swapped for the phone's mic (the XC-TECH camera's mic does that on the A20). AAC 48 kHz 128 kbps.
+While recording: time and size over the preview, the sound source, and the camera mode and PHOTO / VIDEO are locked.
+The file is finished and saved when you stop, the app leaves the screen, the camera stops or is unplugged, free storage
+falls under 500 MB, or the phone reaches severe thermal status.
+No internet permission or background capture.
 The camera stops when the app leaves the screen or is unplugged, and reconnects on return or plug-in.
 On plug-in Android offers to open USB Camera Lab for the camera; "always" skips the access prompt next time.
 A Try again button appears only after access is declined or the camera fails.

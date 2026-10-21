@@ -10,7 +10,12 @@ import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.StructStatVfs;
+import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -23,6 +28,8 @@ import java.util.Locale;
 final class MediaFiles {
     static final Uri PHOTOS=MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
     static final String PHOTO_DIR="Pictures/USB Camera Lab";
+    static final Uri VIDEOS=MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+    static final String VIDEO_DIR="Movies/USB Camera Lab";
     private static final String PREFIX="USBCam_";
     private static boolean cleaned; // once per process: pending rows made later belong to captures still running
     private final ContentResolver resolver;
@@ -46,6 +53,17 @@ final class MediaFiles {
         if(out==null) throw new IOException("can't write "+uri);
         return out;
     }
+    // "rw": MediaRecorder's MP4 writer seeks back to fill in box sizes.
+    ParcelFileDescriptor openFd(Uri uri) throws IOException {
+        ParcelFileDescriptor fd=resolver.openFileDescriptor(uri,"rw");
+        if(fd==null) throw new IOException("can't write "+uri);
+        return fd;
+    }
+    // Free bytes on the file system that holds fd, or -1 if unknown.
+    static long freeBytes(FileDescriptor fd) {
+        try { StructStatVfs s=Os.fstatvfs(fd); return s.f_bavail*s.f_frsize; }
+        catch(ErrnoException e) { return -1; }
+    }
     boolean publish(Uri uri) {
         ContentValues v=new ContentValues(); v.put(MediaStore.MediaColumns.IS_PENDING,0);
         try { return resolver.update(uri,v,null,null)==1; }
@@ -65,17 +83,23 @@ final class MediaFiles {
         try(InputStream in=resolver.openInputStream(uri)) { BitmapFactory.decodeStream(in,null,o); } catch(IOException|RuntimeException e) { return "?"; }
         return o.outWidth+"x"+o.outHeight;
     }
-    // The app's newest published photo (without a storage permission MediaStore lists only the app's own files), or null.
-    Uri newestPhoto() {
-        try(Cursor c=resolver.query(PHOTOS,new String[]{MediaStore.MediaColumns._ID},MediaStore.MediaColumns.RELATIVE_PATH+"=?",new String[]{PHOTO_DIR+"/"},MediaStore.MediaColumns._ID+" DESC")) {
-            return c!=null && c.moveToFirst() ? ContentUris.withAppendedId(PHOTOS,c.getLong(0)) : null;
-        } catch(RuntimeException e) { android.util.Log.w("UsbCameraLab","newest photo",e); return null; }
+    // The app's newest published photo or video (without a storage permission MediaStore lists only the app's own files), or null.
+    Uri newest() {
+        Uri[] collections={PHOTOS,VIDEOS}; String[] dirs={PHOTO_DIR,VIDEO_DIR};
+        Uri best=null; long bestAdded=Long.MIN_VALUE;
+        for(int i=0;i<collections.length;i++) {
+            try(Cursor c=resolver.query(collections[i],new String[]{MediaStore.MediaColumns._ID,MediaStore.MediaColumns.DATE_ADDED},MediaStore.MediaColumns.RELATIVE_PATH+"=?",new String[]{dirs[i]+"/"},MediaStore.MediaColumns._ID+" DESC")) {
+                if(c!=null && c.moveToFirst() && c.getLong(1)>bestAdded) { bestAdded=c.getLong(1); best=ContentUris.withAppendedId(collections[i],c.getLong(0)); }
+            } catch(RuntimeException e) { android.util.Log.w("UsbCameraLab","newest in "+dirs[i],e); }
+        }
+        return best;
     }
+    static boolean isVideo(Uri uri) { return uri.toString().startsWith(VIDEOS.toString()); }
     // Rows a crash or kill left pending; they would otherwise linger until MediaStore expires them (about a week).
     @SuppressWarnings("deprecation") // setIncludePending: Android 10 has no QUERY_ARG_MATCH_PENDING
     void deleteLeftovers() {
         synchronized(MediaFiles.class) { if(cleaned) return; cleaned=true; }
-        for(Uri collection:new Uri[]{PHOTOS,MediaStore.Video.Media.EXTERNAL_CONTENT_URI}) {
+        for(Uri collection:new Uri[]{PHOTOS,VIDEOS}) {
             Bundle q=new Bundle();
             q.putString(ContentResolver.QUERY_ARG_SQL_SELECTION,MediaStore.MediaColumns.IS_PENDING+"=1 AND "+MediaStore.MediaColumns.DISPLAY_NAME+" LIKE ?");
             q.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,new String[]{PREFIX+"%"});

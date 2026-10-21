@@ -38,7 +38,7 @@ public class MainActivity extends Activity {
     // CLOSING: closing an opened camera also closes its USB device (UVCCamera.close), and that onDeviceClose arrives
     // a moment later. Retrying waits until then, so the late event can't land on the next attempt.
     private enum State { IDLE, CONNECTING, OPEN, CLOSING }
-    private static final String IDLE_DETAILS = "Local preview • no recording";
+    private static final String IDLE_DETAILS = "Local preview";
     private static final String NO_CAMERA = "Plug in a USB camera";
     private static final int TEXT = 0xffe8eff5, MUTED = 0xff9aa8b4, ACCENT = 0xff7fc4e0, BACKGROUND = 0xff101820;
     // One CameraHelper per foreground session (onStart..onStop); events from a released helper are ignored.
@@ -59,6 +59,7 @@ public class MainActivity extends Activity {
     // Stream modes: one Size per format and frame size, its fpsList highest first; `mode` is the one streaming.
     private final List<Size> modes = new ArrayList<>();
     private Size mode;
+    private Spinner sizePicker, ratePicker; // off while a capture is busy: a new stream size would change the aspect under a running encoder
     private SharedPreferences savedModes; // the user's pick per camera
     private boolean landscape, fullScreen;
     private LinearLayout root, header, panel, controls;
@@ -83,8 +84,10 @@ public class MainActivity extends Activity {
         action=new Button(this); action.setVisibility(View.GONE); header.addView(action,new LinearLayout.LayoutParams(-2,-2));
         previewBox=new FrameLayout(this);
         preview=new SurfaceView(this); previewBox.addView(preview,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
-        captureBar=new CaptureBar(this); capture=new CaptureController(this,captureBar); captureBar.attach(capture);
+        captureBar=new CaptureBar(this,this::updatePicker); capture=new CaptureController(this,captureBar); captureBar.attach(capture);
         previewBox.addView(captureBar.flash,new FrameLayout.LayoutParams(-1,-1)); previewBox.addView(captureBar.bar);
+        FrameLayout.LayoutParams top=new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL); top.topMargin=dp(10);
+        previewBox.addView(captureBar.info,top);
         previewBox.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,orr,ob) -> fitPreview());
         previewBox.setOnClickListener(v -> setFullScreen(!fullScreen && state==State.OPEN));
         previewBox.setContentDescription("Camera preview. Tap to enter or leave full screen.");
@@ -161,7 +164,7 @@ public class MainActivity extends Activity {
         if(next==State.OPEN) { getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); return; }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         ui.removeCallbacksAndMessages(null); writeQueued=false; pendingWrites.clear();
-        control=null; rows.clear(); controls.removeAllViews(); details.setText(IDLE_DETAILS);
+        control=null; rows.clear(); controls.removeAllViews(); sizePicker=ratePicker=null; details.setText(IDLE_DETAILS);
         modes.clear(); mode=null; setFullScreen(false); // messages and Try again live outside the preview
     }
     private UsbDevice findCamera() {
@@ -187,6 +190,7 @@ public class MainActivity extends Activity {
     private void hideAction() { action.setVisibility(View.GONE); }
     @Override public void onRequestPermissionsResult(int request,String[] permissions,int[] results) {
         super.onRequestPermissionsResult(request,permissions,results);
+        if(request==CaptureBar.MIC_REQUEST) { captureBar.micAnswered(results); return; }
         if(request!=1) return;
         askingPermission=false;
         if(results.length>0 && results[0]==PackageManager.PERMISSION_GRANTED) { connect(); return; }
@@ -228,7 +232,7 @@ public class MainActivity extends Activity {
             if(wanted!=null && !same(wanted,opened)) owner.setPreviewSize(wanted); // queued, so it applies before the stream starts
             owner.startPreview();
             if(preview.getHolder().getSurface().isValid()) owner.addSurface(preview.getHolder().getSurface(),false);
-            showMode(); capture.onCameraOpen(owner,mode);
+            showMode(); capture.onCameraOpen(owner,mode,d.getProductName());
             StringBuilder all=new StringBuilder();
             for(Size m:modes) all.append(all.length()==0?"":"; ").append(m.width).append('x').append(m.height).append(' ').append(format(m)).append(' ').append(m.fpsList);
             android.util.Log.i("UsbCameraLab","modes: "+all+" | opened at "+(opened==null?"?":modeName(opened))+", streaming "+(mode==null?"?":modeName(mode)));
@@ -318,7 +322,7 @@ public class MainActivity extends Activity {
     // controls stay open, so there is no close/reopen round trip. If the camera refuses, UVCAndroid closes it and
     // onDeviceClose reports the lost connection.
     private void applyMode(Size m) {
-        if(state!=State.OPEN || mode==null || same(m,mode)) return;
+        if(state!=State.OPEN || mode==null || same(m,mode) || capture.isBusy()) return;
         android.util.Log.i("UsbCameraLab","mode "+modeName(mode)+" -> "+modeName(m)+" at "+SystemClock.uptimeMillis());
         helper.stopPreview(); helper.setPreviewSize(m); helper.startPreview();
         mode=m; showMode(); capture.onModeChanged(m); scheduleRefresh(); // some cameras reset controls with the stream
@@ -353,6 +357,12 @@ public class MainActivity extends Activity {
         controls.addView(heading("Camera mode"));
         controls.addView(sizes,new LinearLayout.LayoutParams(-1,-2)); controls.addView(rates,new LinearLayout.LayoutParams(-2,-2));
         showRates(rates);
+        sizePicker=sizes; ratePicker=rates; updatePicker();
+    }
+    private void updatePicker() {
+        if(capture==null) return; // CaptureBar reports once while it is being built
+        boolean free=!capture.isBusy();
+        for(Spinner s:new Spinner[]{sizePicker,ratePicker}) if(s!=null) { s.setEnabled(free); s.setAlpha(free?1f:0.45f); }
     }
     private void showRates(Spinner rates) {
         Size res=find(mode.type,mode.width,mode.height); if(res==null) return;
@@ -464,7 +474,7 @@ public class MainActivity extends Activity {
         }
     }
     private void showControls() {
-        controls.removeAllViews(); rows.clear(); if(state!=State.OPEN) return;
+        controls.removeAllViews(); rows.clear(); sizePicker=ratePicker=null; if(state!=State.OPEN) return;
         addModePicker();
         control=helper.getUVCControl(); if(control==null) return;
         long started=SystemClock.uptimeMillis();
@@ -543,7 +553,7 @@ public class MainActivity extends Activity {
     @Override protected void onStop() {
         // release() closes the camera and the USB device. Don't call setStateCallback(null) first: that drops the
         // USB monitor, and release() could no longer close the device.
-        if(helper!=null) { capture.onCameraGone("app stopped"); helper.release(); helper=null; }
+        if(helper!=null) { capture.onCameraGone(CaptureController.APP_STOPPED); helper.release(); helper=null; }
         if(state!=State.IDLE) setState(State.IDLE);
         deviceOpen=false; selected=null;
         super.onStop();
