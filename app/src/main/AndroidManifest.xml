@@ -8,7 +8,8 @@
 <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
 <uses-feature android:name="android.hardware.camera" android:required="false"/>
 <uses-permission android:name="android.permission.CAMERA"/>
-<application android:label="USB Camera Lab" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:supportsRtl="true">
+<!-- largeHeap: a 4K photo briefly allocates about 100 MB (GL readback, its byte[] copy, the Bitmap, the JPEG); UVCAndroid issues #52/#53 report OOM on large or rapid captures. -->
+<application android:label="USB Camera Lab" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:supportsRtl="true" android:largeHeap="true">
 <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode">
 <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
 <!-- Plugging in a UVC camera offers "Open USB Camera Lab" (with "always"); confirming grants USB access. -->

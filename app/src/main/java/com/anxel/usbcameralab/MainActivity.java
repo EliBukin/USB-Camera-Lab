@@ -67,6 +67,8 @@ public class MainActivity extends Activity {
     private double aspect = 4.0/3.0;
     private TextView status, details;
     private Button action; // the one button, shown only when the user has to act
+    private CaptureController capture;
+    private CaptureBar captureBar;
     private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
 
     @Override public void onCreate(Bundle saved) {
@@ -81,6 +83,8 @@ public class MainActivity extends Activity {
         action=new Button(this); action.setVisibility(View.GONE); header.addView(action,new LinearLayout.LayoutParams(-2,-2));
         previewBox=new FrameLayout(this);
         preview=new SurfaceView(this); previewBox.addView(preview,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
+        captureBar=new CaptureBar(this); capture=new CaptureController(this,captureBar); captureBar.attach(capture);
+        previewBox.addView(captureBar.flash,new FrameLayout.LayoutParams(-1,-1)); previewBox.addView(captureBar.bar);
         previewBox.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,orr,ob) -> fitPreview());
         previewBox.setOnClickListener(v -> setFullScreen(!fullScreen && state==State.OPEN));
         previewBox.setContentDescription("Camera preview. Tap to enter or leave full screen.");
@@ -104,6 +108,7 @@ public class MainActivity extends Activity {
     @Override public void onConfigurationChanged(Configuration c) { super.onConfigurationChanged(c); arrange(c); }
     private void arrange(Configuration c) {
         landscape=c.orientation==Configuration.ORIENTATION_LANDSCAPE;
+        captureBar.arrange(landscape);
         ViewGroup parent=(ViewGroup)header.getParent(); if(parent!=null) parent.removeView(header);
         if(landscape) {
             panel.addView(header,0,new LinearLayout.LayoutParams(-1,-2)); root.setOrientation(LinearLayout.HORIZONTAL);
@@ -120,7 +125,7 @@ public class MainActivity extends Activity {
     }
     // Full screen: only the preview, letterboxed on black, with the system bars hidden (a swipe shows them for a moment).
     // A tap or Back returns. Only views change, so the stream keeps running.
-    @SuppressWarnings("deprecation") // system UI flags: the only way before Android 11 (minSdk 23)
+    @SuppressWarnings("deprecation") // system UI flags: the only way before Android 11 (minSdk 29)
     private void setFullScreen(boolean on) {
         if(on==fullScreen) return;
         fullScreen=on;
@@ -151,6 +156,7 @@ public class MainActivity extends Activity {
     private void say(String value) { status.setText(value); android.util.Log.i("UsbCameraLab",value); }
     private boolean video(UsbDevice d) { for(int i=0;i<d.getInterfaceCount();i++) if(d.getInterface(i).getInterfaceClass()==UsbConstants.USB_CLASS_VIDEO) return true; return false; }
     private void setState(State next) {
+        if(state==State.OPEN && next!=State.OPEN) capture.onCameraGone("state "+next);
         state=next; android.util.Log.i("UsbCameraLab","state "+next);
         if(next==State.OPEN) { getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); return; }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -222,7 +228,7 @@ public class MainActivity extends Activity {
             if(wanted!=null && !same(wanted,opened)) owner.setPreviewSize(wanted); // queued, so it applies before the stream starts
             owner.startPreview();
             if(preview.getHolder().getSurface().isValid()) owner.addSurface(preview.getHolder().getSurface(),false);
-            showMode();
+            showMode(); capture.onCameraOpen(owner,mode);
             StringBuilder all=new StringBuilder();
             for(Size m:modes) all.append(all.length()==0?"":"; ").append(m.width).append('x').append(m.height).append(' ').append(format(m)).append(' ').append(m.fpsList);
             android.util.Log.i("UsbCameraLab","modes: "+all+" | opened at "+(opened==null?"?":modeName(opened))+", streaming "+(mode==null?"?":modeName(mode)));
@@ -315,7 +321,7 @@ public class MainActivity extends Activity {
         if(state!=State.OPEN || mode==null || same(m,mode)) return;
         android.util.Log.i("UsbCameraLab","mode "+modeName(mode)+" -> "+modeName(m)+" at "+SystemClock.uptimeMillis());
         helper.stopPreview(); helper.setPreviewSize(m); helper.startPreview();
-        mode=m; showMode(); scheduleRefresh(); // some cameras reset controls with the stream
+        mode=m; showMode(); capture.onModeChanged(m); scheduleRefresh(); // some cameras reset controls with the stream
         savedModes.edit().putString(cameraKey(selected),m.type+","+m.width+","+m.height+","+m.fps).apply();
     }
     private interface Picked { void at(int position); }
@@ -527,15 +533,20 @@ public class MainActivity extends Activity {
     @Override protected void onStart() {
         super.onStart();
         helper=new CameraHelper(); helper.setStateCallback(new Events(helper));
+        // Applies to every openCamera of this helper. No library AudioRecord: it would open one at each camera open once the
+        // app holds RECORD_AUDIO (video with the camera's mic records through its own path).
+        helper.setImageCaptureConfig(helper.getImageCaptureConfig().setJpegCompressionQuality(95));
+        helper.setVideoCaptureConfig(helper.getVideoCaptureConfig().setAudioCaptureEnable(false));
         waitForUser=false; hideAction();
         connect(); // a camera that is already plugged in; later ones arrive through onAttach
     }
     @Override protected void onStop() {
         // release() closes the camera and the USB device. Don't call setStateCallback(null) first: that drops the
         // USB monitor, and release() could no longer close the device.
-        if(helper!=null) { helper.release(); helper=null; }
+        if(helper!=null) { capture.onCameraGone("app stopped"); helper.release(); helper=null; }
         if(state!=State.IDLE) setState(State.IDLE);
         deviceOpen=false; selected=null;
         super.onStop();
     }
+    @Override protected void onDestroy() { capture.release(); captureBar.release(); super.onDestroy(); }
 }
