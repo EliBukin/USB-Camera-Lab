@@ -6,6 +6,7 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Typeface;
@@ -13,6 +14,7 @@ import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
@@ -22,6 +24,7 @@ import com.herohan.uvcapp.*;
 import com.serenegiant.usb.*;
 import com.serenegiant.utils.UVCUtils;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -37,7 +40,7 @@ public class MainActivity extends Activity {
     private enum State { IDLE, CONNECTING, OPEN, CLOSING }
     private static final String IDLE_DETAILS = "Local preview • no recording";
     private static final String NO_CAMERA = "Plug in a USB camera";
-    private static final int TEXT = 0xffe8eff5, MUTED = 0xff9aa8b4, ACCENT = 0xff7fc4e0;
+    private static final int TEXT = 0xffe8eff5, MUTED = 0xff9aa8b4, ACCENT = 0xff7fc4e0, BACKGROUND = 0xff101820;
     // One CameraHelper per foreground session (onStart..onStop); events from a released helper are ignored.
     private CameraHelper helper;
     private State state = State.IDLE;
@@ -53,7 +56,11 @@ public class MainActivity extends Activity {
     private final List<Row> rows = new ArrayList<>();
     private final Map<Row,Integer> pendingWrites = new LinkedHashMap<>(); // slider values waiting to be sent
     private boolean writeQueued, updating;
-    private boolean landscape;
+    // Stream modes: one Size per format and frame size, its fpsList highest first; `mode` is the one streaming.
+    private final List<Size> modes = new ArrayList<>();
+    private Size mode;
+    private SharedPreferences savedModes; // the user's pick per camera
+    private boolean landscape, fullScreen;
     private LinearLayout root, header, panel, controls;
     private FrameLayout previewBox;
     private SurfaceView preview;
@@ -66,7 +73,8 @@ public class MainActivity extends Activity {
         super.onCreate(saved);
         UVCUtils.init(getApplication());
         usb=(UsbManager)getSystemService(USB_SERVICE);
-        root=new LinearLayout(this); root.setPadding(dp(12),dp(12),dp(12),dp(8)); root.setBackgroundColor(0xff101820);
+        savedModes=getSharedPreferences("modes",MODE_PRIVATE);
+        root=new LinearLayout(this); root.setBackgroundColor(BACKGROUND);
         header=new LinearLayout(this); header.setOrientation(LinearLayout.VERTICAL);
         header.addView(text("USB Camera Lab",22));
         status=text(NO_CAMERA,15); header.addView(status);
@@ -74,6 +82,8 @@ public class MainActivity extends Activity {
         previewBox=new FrameLayout(this);
         preview=new SurfaceView(this); previewBox.addView(preview,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
         previewBox.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,orr,ob) -> fitPreview());
+        previewBox.setOnClickListener(v -> setFullScreen(!fullScreen && state==State.OPEN));
+        previewBox.setContentDescription("Camera preview. Tap to enter or leave full screen.");
         panel=new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL);
         details=text(IDLE_DETAILS,14); panel.addView(details);
         controls=new LinearLayout(this); controls.setOrientation(LinearLayout.VERTICAL);
@@ -105,10 +115,30 @@ public class MainActivity extends Activity {
             panel.setLayoutParams(new LinearLayout.LayoutParams(-1,0,1)); panel.setPaddingRelative(0,0,0,0);
             root.post(this::sizePreview);
         }
+        if(fullScreen) { previewBox.setLayoutParams(new LinearLayout.LayoutParams(-1,-1)); root.setPadding(0,0,0,0); }
+        else root.setPadding(dp(12),dp(12),dp(12),dp(8));
     }
+    // Full screen: only the preview, letterboxed on black, with the system bars hidden (a swipe shows them for a moment).
+    // A tap or Back returns. Only views change, so the stream keeps running.
+    @SuppressWarnings("deprecation") // system UI flags: the only way before Android 11 (minSdk 23)
+    private void setFullScreen(boolean on) {
+        if(on==fullScreen) return;
+        fullScreen=on;
+        header.setVisibility(on?View.GONE:View.VISIBLE); panel.setVisibility(on?View.GONE:View.VISIBLE);
+        root.setBackgroundColor(on?0xff000000:BACKGROUND);
+        arrange(getResources().getConfiguration());
+        if(Build.VERSION.SDK_INT>=30) {
+            WindowInsetsController bars=getWindow().getInsetsController();
+            if(bars==null) return;
+            bars.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            if(on) bars.hide(WindowInsets.Type.systemBars()); else bars.show(WindowInsets.Type.systemBars());
+        } else getWindow().getDecorView().setSystemUiVisibility(on?View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY:0);
+    }
+    @SuppressWarnings("deprecation") // still called on every version while the app doesn't opt in to predictive back
+    @Override public void onBackPressed() { if(fullScreen) setFullScreen(false); else super.onBackPressed(); }
     // Portrait: the preview gets the full width at the camera's aspect ratio (at most 55% of the height); controls scroll below.
     private void sizePreview() {
-        if(landscape) return;
+        if(landscape || fullScreen) return;
         int w=root.getWidth()-root.getPaddingLeft()-root.getPaddingRight(), h=root.getHeight()-root.getPaddingTop()-root.getPaddingBottom();
         if(w<=0 || h<=0) return;
         int target=Math.min((int)Math.round(w/aspect),h*55/100);
@@ -117,6 +147,7 @@ public class MainActivity extends Activity {
     }
     private int dp(int value) { return Math.round(value*getResources().getDisplayMetrics().density); }
     private TextView text(String value,int size) { TextView t=new TextView(this); t.setText(value); t.setTextColor(TEXT); t.setTextSize(size); t.setPadding(0,dp(4),0,dp(4)); return t; }
+    private TextView heading(String value) { TextView h=text(value,13); h.setTextColor(ACCENT); h.setTypeface(Typeface.DEFAULT_BOLD); h.setPadding(0,dp(12),0,dp(2)); return h; }
     private void say(String value) { status.setText(value); android.util.Log.i("UsbCameraLab",value); }
     private boolean video(UsbDevice d) { for(int i=0;i<d.getInterfaceCount();i++) if(d.getInterface(i).getInterfaceClass()==UsbConstants.USB_CLASS_VIDEO) return true; return false; }
     private void setState(State next) {
@@ -125,6 +156,7 @@ public class MainActivity extends Activity {
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         ui.removeCallbacksAndMessages(null); writeQueued=false; pendingWrites.clear();
         control=null; rows.clear(); controls.removeAllViews(); details.setText(IDLE_DETAILS);
+        modes.clear(); mode=null; setFullScreen(false); // messages and Try again live outside the preview
     }
     private UsbDevice findCamera() {
         List<UsbDevice> devices=helper==null?null:helper.getDeviceList();
@@ -137,7 +169,7 @@ public class MainActivity extends Activity {
         if(d==null) { hideAction(); say(NO_CAMERA); return; }
         if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED) { askingPermission=true; requestPermissions(new String[]{Manifest.permission.CAMERA},1); return; }
         waitForUser=false; hideAction();
-        if(deviceOpen && selected!=null) { setState(State.CONNECTING); say("Opening camera…"); helper.openCamera(); return; }
+        if(deviceOpen && selected!=null) { setState(State.CONNECTING); say("Opening camera…"); helper.openCamera(openParam(selected)); return; }
         selected=d; setState(State.CONNECTING);
         say(usb.hasPermission(d)?"Connecting…":"Allow USB access to the camera…");
         helper.selectDevice(d);
@@ -178,18 +210,22 @@ public class MainActivity extends Activity {
         public void onDeviceOpen(UsbDevice d,boolean first) {
             if(stale()) return;
             deviceOpen=true; selected=d;
-            if(state==State.CONNECTING) { say("Opening camera…"); owner.openCamera(); }
+            if(state==State.CONNECTING) { say("Opening camera…"); owner.openCamera(openParam(d)); }
         }
         public void onCameraOpen(UsbDevice d) {
             if(stale()) return;
             if(state!=State.CONNECTING) { if(state==State.IDLE) owner.closeCamera(); return; } // CLOSING: our closeCamera() is already queued
             setState(State.OPEN); selected=d;
+            loadModes(owner.getSupportedSizeList());
+            Size opened=owner.getPreviewSize(), wanted=pickMode(d);
+            mode=wanted==null?opened:wanted;
+            if(wanted!=null && !same(wanted,opened)) owner.setPreviewSize(wanted); // queued, so it applies before the stream starts
             owner.startPreview();
             if(preview.getHolder().getSurface().isValid()) owner.addSurface(preview.getHolder().getSurface(),false);
-            Size s=owner.getPreviewSize();
-            if(s!=null) { aspect=(double)s.width/s.height; preview.getHolder().setFixedSize(s.width,s.height); fitPreview(); sizePreview(); }
-            String name=d.getProductName();
-            details.setText((name==null?"USB camera":name)+(s==null?"":" • "+s.width+" × "+s.height));
+            showMode();
+            StringBuilder all=new StringBuilder();
+            for(Size m:modes) all.append(all.length()==0?"":"; ").append(m.width).append('x').append(m.height).append(' ').append(format(m)).append(' ').append(m.fpsList);
+            android.util.Log.i("UsbCameraLab","modes: "+all+" | opened at "+(opened==null?"?":modeName(opened))+", streaming "+(mode==null?"?":modeName(mode)));
             say("Camera open • preview running");
             ui.postDelayed(MainActivity.this::showControls,700); // UVCControl: support flags can be wrong right after open
         }
@@ -221,6 +257,102 @@ public class MainActivity extends Activity {
         if(w/(double)h>aspect) w=(int)(h*aspect); else h=(int)(w/aspect);
         android.view.ViewGroup.LayoutParams old=preview.getLayoutParams();
         if(old.width!=w || old.height!=h) preview.setLayoutParams(new FrameLayout.LayoutParams(w,h,Gravity.CENTER));
+    }
+
+    // ---- Stream mode: format, frame size and frame rate ----
+    private static String format(Size s) { return s.type==UVCCamera.UVC_VS_FRAME_MJPEG?"MJPEG":"YUYV"; }
+    private static String modeName(Size s) { return s.width+" × "+s.height+" "+format(s)+" "+s.fps+" fps"; }
+    private static boolean same(Size a,Size b) { return a!=null && b!=null && a.type==b.type && a.width==b.width && a.height==b.height && a.fps==b.fps; }
+    private static Size at(Size res,int fps) { return new Size(res.type,res.width,res.height,fps,res.fpsList); }
+    private static String cameraKey(UsbDevice d) { return String.format(Locale.US,"%04x:%04x %s",d.getVendorId(),d.getProductId(),d.getProductName()); }
+    private Size find(int type,int width,int height) { for(Size m:modes) if(m.type==type && m.width==width && m.height==height) return m; return null; }
+    private void loadModes(List<Size> sizes) {
+        modes.clear(); if(sizes==null) return;
+        for(Size s:sizes) {
+            Size m=find(s.type,s.width,s.height); // a camera may list a frame size twice
+            if(m==null) { m=new Size(s.type,s.width,s.height,0,new ArrayList<>()); modes.add(m); }
+            if(s.fpsList!=null) for(int f:s.fpsList) if(!m.fpsList.contains(f)) m.fpsList.add(f);
+            if(!m.fpsList.contains(s.fps)) m.fpsList.add(s.fps);
+        }
+        for(Size m:modes) { Collections.sort(m.fpsList,Collections.reverseOrder()); m.fps=m.fpsList.get(0); }
+        Collections.sort(modes,(a,b) -> a.type!=b.type ? (a.type==UVCCamera.UVC_VS_FRAME_MJPEG?-1:1) : b.width*b.height-a.width*a.height);
+    }
+    // `preferred` when the size offers it, else its highest rate up to 30 fps, else its lowest.
+    private static int rate(Size res,int preferred) {
+        if(res.fpsList.contains(preferred)) return preferred;
+        for(int f:res.fpsList) if(f<=30) return f;
+        return res.fpsList.get(res.fpsList.size()-1);
+    }
+    private Size savedMode(UsbDevice d) {
+        String[] p=savedModes.getString(cameraKey(d),"").split(",");
+        try { int fps=Integer.parseInt(p[3]); return new Size(Integer.parseInt(p[0]),Integer.parseInt(p[1]),Integer.parseInt(p[2]),fps,Collections.singletonList(fps)); }
+        catch(RuntimeException e) { return null; } // nothing saved for this camera
+    }
+    // The user's pick for this camera while it still offers it. Otherwise the largest MJPEG size within 1920 × 1080 (1080p when
+    // offered) at up to 30 fps: the phone decodes every frame, and on the A20 (low-end SoC, USB 2.0) 4K previews at about
+    // 11 fps against 30 for 1080p. null keeps the library's choice.
+    private Size pickMode(UsbDevice d) {
+        Size s=savedMode(d), m=s==null?null:find(s.type,s.width,s.height);
+        if(m!=null && m.fpsList.contains(s.fps)) return at(m,s.fps);
+        for(Size o:modes) if(o.type==UVCCamera.UVC_VS_FRAME_MJPEG && o.width<=1920 && o.height<=1080) return at(o,rate(o,30)); // largest first
+        return null;
+    }
+    // Open straight in the wanted mode. When the camera lacks it UVCCamera.open falls back to its own default (the largest
+    // MJPEG size), and onCameraOpen switches before the stream starts.
+    private UVCParam openParam(UsbDevice d) {
+        Size s=savedMode(d);
+        return new UVCParam(s!=null?s:new Size(UVCCamera.UVC_VS_FRAME_MJPEG,1920,1080,30,Collections.singletonList(30)),0);
+    }
+    private void showMode() {
+        if(mode!=null) { aspect=(double)mode.width/mode.height; preview.getHolder().setFixedSize(mode.width,mode.height); fitPreview(); sizePreview(); }
+        String name=selected==null?null:selected.getProductName();
+        details.setText((name==null?"USB camera":name)+(mode==null?"":" • "+modeName(mode)));
+    }
+    // Switch in place: stop, renegotiate, start (queued in order on the helper's thread). The camera, USB device, surfaces and
+    // controls stay open, so there is no close/reopen round trip. If the camera refuses, UVCAndroid closes it and
+    // onDeviceClose reports the lost connection.
+    private void applyMode(Size m) {
+        if(state!=State.OPEN || mode==null || same(m,mode)) return;
+        android.util.Log.i("UsbCameraLab","mode "+modeName(mode)+" -> "+modeName(m)+" at "+SystemClock.uptimeMillis());
+        helper.stopPreview(); helper.setPreviewSize(m); helper.startPreview();
+        mode=m; showMode(); scheduleRefresh(); // some cameras reset controls with the stream
+        savedModes.edit().putString(cameraKey(selected),m.type+","+m.width+","+m.height+","+m.fps).apply();
+    }
+    private interface Picked { void at(int position); }
+    private Spinner spinner(Picked picked) {
+        Spinner s=new Spinner(this);
+        s.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() { // also fires for setSelection and new adapters: applyMode ignores the current mode
+            public void onItemSelected(AdapterView<?> a,View v,int i,long id) { if(state==State.OPEN && mode!=null) picked.at(i); }
+            public void onNothingSelected(AdapterView<?> a) {}
+        });
+        return s;
+    }
+    private void fill(Spinner s,List<String> labels,int selected) {
+        ArrayAdapter<String> a=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,labels);
+        a.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        s.setAdapter(a); s.setSelection(selected,false);
+    }
+    // "Camera mode" heads the panel: format and frame size, then a frame-rate list when that size offers more than one.
+    private void addModePicker() {
+        if(mode==null || modes.isEmpty()) return;
+        Spinner rates=spinner(i -> { Size res=find(mode.type,mode.width,mode.height); if(res!=null) applyMode(at(res,res.fpsList.get(i))); });
+        Spinner sizes=spinner(i -> { Size res=modes.get(i); applyMode(at(res,rate(res,mode.fps))); showRates(rates); });
+        List<String> labels=new ArrayList<>(); int current=0;
+        for(Size m:modes) {
+            if(m.type==mode.type && m.width==mode.width && m.height==mode.height) current=labels.size();
+            int lowest=m.fpsList.get(m.fpsList.size()-1);
+            labels.add(m.width+" × "+m.height+" "+format(m)+" • "+(lowest==m.fps?"":lowest+"–")+m.fps+" fps");
+        }
+        fill(sizes,labels,current);
+        controls.addView(heading("Camera mode"));
+        controls.addView(sizes,new LinearLayout.LayoutParams(-1,-2)); controls.addView(rates,new LinearLayout.LayoutParams(-2,-2));
+        showRates(rates);
+    }
+    private void showRates(Spinner rates) {
+        Size res=find(mode.type,mode.width,mode.height); if(res==null) return;
+        List<String> labels=new ArrayList<>(); for(int f:res.fpsList) labels.add(f+" fps");
+        fill(rates,labels,Math.max(0,res.fpsList.indexOf(mode.fps)));
+        rates.setVisibility(res.fpsList.size()>1?View.VISIBLE:View.GONE);
     }
 
     // ---- Camera controls: every UVC control UVCAndroid can drive, shown only when the camera reports it ----
@@ -327,6 +459,7 @@ public class MainActivity extends Activity {
     }
     private void showControls() {
         controls.removeAllViews(); rows.clear(); if(state!=State.OPEN) return;
+        addModePicker();
         control=helper.getUVCControl(); if(control==null) return;
         long started=SystemClock.uptimeMillis();
         List<View> views=new ArrayList<>(); String section=null;
@@ -334,7 +467,7 @@ public class MainActivity extends Activity {
             if(!control.checkSupportFlag(s.flag)) continue;
             Row r=new Row(s);
             if(!r.build()) { android.util.Log.w("UsbCameraLab","control "+s.label+" reported but has no usable range"); continue; }
-            if(!s.section.equals(section)) { section=s.section; TextView h=text(section,13); h.setTextColor(ACCENT); h.setTypeface(Typeface.DEFAULT_BOLD); h.setPadding(0,dp(12),0,dp(2)); views.add(h); }
+            if(!s.section.equals(section)) { section=s.section; views.add(heading(section)); }
             views.add(r.view); rows.add(r);
         }
         StringBuilder unlisted=new StringBuilder();
