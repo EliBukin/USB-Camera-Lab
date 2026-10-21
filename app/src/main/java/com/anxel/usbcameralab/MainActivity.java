@@ -5,6 +5,7 @@ import static com.serenegiant.usb.UVCControl.*;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -70,6 +71,11 @@ public class MainActivity extends Activity {
     private Button action; // the one button, shown only when the user has to act
     private CaptureController capture;
     private CaptureBar captureBar;
+    // Auto controls a time-lapse turned off ("Lock exposure / WB / focus"), on the camera with this key, until the
+    // user answers the offer to turn them back on. The camera keeps them off across reconnects, so the offer waits for one.
+    private final List<Spec> locked = new ArrayList<>();
+    private String lockedCamera;
+    private AlertDialog restoreDialog;
     private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
 
     @Override public void onCreate(Bundle saved) {
@@ -84,7 +90,7 @@ public class MainActivity extends Activity {
         action=new Button(this); action.setVisibility(View.GONE); header.addView(action,new LinearLayout.LayoutParams(-2,-2));
         previewBox=new FrameLayout(this);
         preview=new SurfaceView(this); previewBox.addView(preview,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
-        captureBar=new CaptureBar(this,this::updatePicker); capture=new CaptureController(this,captureBar); captureBar.attach(capture);
+        captureBar=new CaptureBar(this,captureHost); capture=new CaptureController(this,captureBar); captureBar.attach(capture);
         previewBox.addView(captureBar.flash,new FrameLayout.LayoutParams(-1,-1)); previewBox.addView(captureBar.bar);
         FrameLayout.LayoutParams top=new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL); top.topMargin=dp(10);
         previewBox.addView(captureBar.info,top);
@@ -100,6 +106,7 @@ public class MainActivity extends Activity {
         root.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,orr,ob) -> root.post(this::sizePreview));
         arrange(getResources().getConfiguration());
         setContentView(root);
+        addContentView(captureBar.dim,new ViewGroup.LayoutParams(-1,-1)); // over everything while a time-lapse runs dimmed
         preview.getHolder().addCallback(new SurfaceHolder.Callback() {
             public void surfaceCreated(SurfaceHolder h) { if(state==State.OPEN) helper.addSurface(h.getSurface(),false); }
             public void surfaceChanged(SurfaceHolder h,int f,int w,int height) {}
@@ -143,7 +150,7 @@ public class MainActivity extends Activity {
         } else getWindow().getDecorView().setSystemUiVisibility(on?View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY:0);
     }
     @SuppressWarnings("deprecation") // still called on every version while the app doesn't opt in to predictive back
-    @Override public void onBackPressed() { if(fullScreen) setFullScreen(false); else super.onBackPressed(); }
+    @Override public void onBackPressed() { if(captureBar.wake()) return; if(fullScreen) setFullScreen(false); else super.onBackPressed(); }
     // Portrait: the preview gets the full width at the camera's aspect ratio (at most 55% of the height); controls scroll below.
     private void sizePreview() {
         if(landscape || fullScreen) return;
@@ -328,6 +335,14 @@ public class MainActivity extends Activity {
         mode=m; showMode(); capture.onModeChanged(m); scheduleRefresh(); // some cameras reset controls with the stream
         savedModes.edit().putString(cameraKey(selected),m.type+","+m.width+","+m.height+","+m.fps).apply();
     }
+    // A switch from outside the picker (the capture hints): the picker shows the new mode too. Its listeners fire for the new
+    // selection and find the mode already applied.
+    private void switchMode(Size m) {
+        applyMode(m);
+        if(sizePicker==null || ratePicker==null || !same(m,mode)) return;
+        for(int i=0;i<modes.size();i++) { Size o=modes.get(i); if(o.type==m.type && o.width==m.width && o.height==m.height) sizePicker.setSelection(i,false); }
+        showRates(ratePicker);
+    }
     private interface Picked { void at(int position); }
     private Spinner spinner(Picked picked) {
         Spinner s=new Spinner(this);
@@ -358,6 +373,47 @@ public class MainActivity extends Activity {
         controls.addView(sizes,new LinearLayout.LayoutParams(-1,-2)); controls.addView(rates,new LinearLayout.LayoutParams(-2,-2));
         showRates(rates);
         sizePicker=sizes; ratePicker=rates; updatePicker();
+    }
+    private final CaptureBar.Host captureHost=new CaptureBar.Host() {
+        public void busyChanged() { updatePicker(); }
+        public CaptureBar.Hint hint(CaptureController.Mode m) { return modeHint(m); }
+        public boolean canLock() { for(Row r:rows) if(r.toggle!=null && lockable(r.spec)) return true; return false; }
+        public void lockAuto() { MainActivity.this.lockAuto(); }
+        public void runEnded() { offerRestore(); }
+    };
+    // Video is 1920 × 1080 at most, and decoding a larger stream is slow (4K: about 11 fps on the A20, so 4K video is choppy).
+    // A larger stream, or one under 24 fps, gets a one-tap switch to the mode the picker starts with: the largest MJPEG size
+    // within 1920 × 1080 at up to 30 fps. A time-lapse keeps one frame a second at most, so it gets the largest size within
+    // 1920 × 1080 at the lowest frame rate the camera offers for it: fewer frames to decode keep the phone cooler and the battery
+    // going on long runs. Only a suggestion: photos may want 4K, and a smaller size is the user's choice.
+    private CaptureBar.Hint modeHint(CaptureController.Mode m) {
+        if(state!=State.OPEN || mode==null || modes.isEmpty()) return null;
+        boolean big=mode.width>1920 || mode.height>1080;
+        if(m==CaptureController.Mode.VIDEO) {
+            Size best=null;
+            for(Size o:modes) if(o.type==UVCCamera.UVC_VS_FRAME_MJPEG && o.width<=1920 && o.height<=1080) { best=at(o,rate(o,30)); break; } // largest first
+            if(best==null || same(best,mode)) return null;
+            Size to=best;
+            if(big) return new CaptureBar.Hint("Video is 1080p at most; a larger stream makes it choppy.","Switch to "+shortName(to),() -> switchMode(to));
+            if(mode.fps<24 && to.fps>mode.fps) return new CaptureBar.Hint("This camera mode runs at "+mode.fps+" fps.","Switch to "+shortName(to),() -> switchMode(to));
+            return null;
+        }
+        if(m!=CaptureController.Mode.TIMELAPSE) return null;
+        Size best=null;
+        for(Size o:modes) if(o.width<=1920 && o.height<=1080) {
+            int low=o.fpsList.get(o.fpsList.size()-1);
+            if(best==null || o.width*o.height>best.width*best.height || (o.width*o.height==best.width*best.height && low<best.fps)) best=at(o,low);
+        }
+        if(best==null || same(best,mode)) return null;
+        Size to=best;
+        if(big) return new CaptureBar.Hint("Time-lapse is 1080p at most; a smaller, slower stream saves battery.","Switch to "+shortName(to),() -> switchMode(to));
+        if(mode.width==to.width && mode.height==to.height && mode.fps>to.fps) return new CaptureBar.Hint("A slower camera stream saves battery on long time-lapses.","Switch to "+to.fps+" fps",() -> switchMode(to));
+        return null;
+    }
+    // "1080p", "1080p 5 fps", "1440 × 1080"
+    private static String shortName(Size s) {
+        String size=s.width==s.height*16/9?s.height+"p":s.width+" × "+s.height;
+        return size+(s.fps==30?"":" "+s.fps+" fps");
     }
     private void updatePicker() {
         if(capture==null) return; // CaptureBar reports once while it is being built
@@ -473,6 +529,44 @@ public class MainActivity extends Activity {
             View b=group.findViewById(group.getCheckedRadioButtonId()); return spec.label+"="+(b==null?"?":b.getTag());
         }
     }
+    // "Lock exposure / WB / focus": the auto modes a time-lapse turns off, so frames don't drift or flicker.
+    private static boolean lockable(Spec s) { return s.flag==CT_AE_MODE_CONTROL || s.flag==PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL || s.flag==CT_FOCUS_AUTO_CONTROL; }
+    // Before a time-lapse: each lockable auto mode that is on goes off, and the camera holds what auto had chosen. Nothing is
+    // written back: the XC-TECH camera reports color temperature 4 (of its 1..5 presets) while auto white balance runs, and
+    // writing that 4 turned the picture orange, while only switching auto off kept it. The camera remembers manual mode, also
+    // across reconnects, hence the offer to turn auto back on.
+    private void lockAuto() {
+        if(state!=State.OPEN || control==null) return;
+        StringBuilder log=new StringBuilder();
+        for(Row t:rows) if(t.toggle!=null && lockable(t.spec) && t.toggle.isChecked()) {
+            Row manual=null; for(Row r:rows) if(r.spec.autoFlag==t.spec.flag) manual=r;
+            int value=manual==null?0:manual.spec.get.get(control);
+            t.spec.set.set(control,0);
+            if(!locked.contains(t.spec)) locked.add(t.spec);
+            log.append(log.length()==0?"":", ").append(t.spec.label).append(" off").append(manual==null?"":" ("+manual.spec.label+" read "+value+")");
+        }
+        if(!locked.isEmpty()) lockedCamera=cameraKey(selected);
+        android.util.Log.i("UsbCameraLab","lock: "+(log.length()==0?"nothing on to lock":log));
+        ui.removeCallbacks(refresh); refresh.run();
+    }
+    // After a time-lapse, or at the next open of that camera when the run ended with it: offer to turn the auto modes back on.
+    private void offerRestore() {
+        if(locked.isEmpty() || restoreDialog!=null || state!=State.OPEN || control==null || capture.isBusy()) return;
+        if(!cameraKey(selected).equals(lockedCamera)) return;
+        StringBuilder names=new StringBuilder();
+        for(int i=0;i<locked.size();i++) names.append(i==0?"":i==locked.size()-1?" and ":", ").append(locked.get(i).label.toLowerCase(Locale.US));
+        restoreDialog=new AlertDialog.Builder(this).setTitle("Turn automatic settings back on?")
+                .setMessage("The time-lapse turned off "+names+" to keep its frames steady.")
+                .setPositiveButton("Turn back on",(d,w) -> restoreAuto())
+                .setNegativeButton("Keep manual",(d,w) -> locked.clear())
+                .setCancelable(false).setOnDismissListener(d -> restoreDialog=null).show();
+    }
+    private void restoreAuto() {
+        if(state!=State.OPEN || control==null) return; // the camera went away meanwhile: asked again at its next open
+        for(Spec s:locked) s.set.set(control,1);
+        android.util.Log.i("UsbCameraLab","lock: restored "+locked.size()+" auto mode(s)");
+        locked.clear(); scheduleRefresh();
+    }
     private void showControls() {
         controls.removeAllViews(); rows.clear(); sizePicker=ratePicker=null; if(state!=State.OPEN) return;
         addModePicker();
@@ -496,6 +590,8 @@ public class MainActivity extends Activity {
         StringBuilder log=new StringBuilder();
         for(Row r:rows) log.append(log.length()==0?"":"; ").append(r.describe());
         android.util.Log.i("UsbCameraLab","controls ("+(SystemClock.uptimeMillis()-started)+" ms): "+log+(unlisted.length()>0?" | unlisted: "+unlisted:""));
+        captureBar.captureChanged(); // the lock option needs the controls
+        offerRestore();
     }
     // A slider disabled while its auto mode is on: the camera picks that value itself.
     private void updateEnabled() {

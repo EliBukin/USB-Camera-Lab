@@ -37,7 +37,8 @@ final class VideoRecorder {
     }
     // The A20's H.264 encoder stops at 1920 × 1088. Fitting 1080 lines gives 1920 × 1080 for 16:9 and 1440 × 1080 for 4:3.
     static final int MAX_WIDTH=1920, MAX_HEIGHT=1080;
-    private static final long MIN_FREE=500_000_000L, TICK_MS=1000;
+    static final long MIN_FREE=500_000_000L; // bytes; time-lapse uses it too
+    private static final long TICK_MS=1000;
     private static final int SPACE_EVERY=5; // ticks between free-space checks
     // USB mics that sent only exact zeros this run. A working mic always has a noise floor; zeros mean the device sends nothing,
     // e.g. muted in its own controls, which Android never changes. The A20 lists, routes and reads the XC-TECH camera's mic and

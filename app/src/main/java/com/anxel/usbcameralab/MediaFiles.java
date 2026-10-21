@@ -35,7 +35,9 @@ final class MediaFiles {
     private final ContentResolver resolver;
     MediaFiles(Context context) { resolver=context.getContentResolver(); }
 
-    static String name(long time,String extension) { return PREFIX+new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(new Date(time))+extension; }
+    static String name(long time,String extension) { return name("",time,extension); }
+    // kind: "TL_" for time-lapse, before the date.
+    static String name(String kind,long time,String extension) { return PREFIX+kind+new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(new Date(time))+extension; }
     // MediaStore adds " (1)" when the name is taken (two shots in one second).
     Uri create(Uri collection,String dir,String name,String mime,long time) throws IOException {
         ContentValues v=new ContentValues();

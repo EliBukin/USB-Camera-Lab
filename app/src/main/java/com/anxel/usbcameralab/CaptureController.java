@@ -2,6 +2,7 @@ package com.anxel.usbcameralab;
 
 import android.Manifest;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.net.Uri;
@@ -13,37 +14,48 @@ import com.serenegiant.usb.Size;
 
 // Capture on top of the camera session: the mode, the shutter, the shot or recording in flight and the last saved file. It holds
 // no Activity, only a Listener, so it can later live in a foreground service. Main thread only; MediaStore work for photos runs
-// on its own "capture-io" thread, a recording on its own thread. Valid while the camera is OPEN: MainActivity calls onCameraOpen,
-// and onCameraGone first on every way out of OPEN.
+// on its own "capture-io" thread, a recording or time-lapse on its own thread. Valid while the camera is OPEN: MainActivity calls
+// onCameraOpen, and onCameraGone first on every way out of OPEN. The mode and the time-lapse interval survive restarts.
 final class CaptureController {
-    enum Mode { PHOTO, VIDEO } // TIMELAPSE comes in a later phase
+    enum Mode { PHOTO, VIDEO, TIMELAPSE }
     static final String APP_STOPPED="app stopped"; // onCameraGone reason when the app leaves the screen
+    static final String PREFS="capture"; // also holds CaptureBar's settings
     interface Listener {
         void captureChanged();                          // mode(), canShoot(), isBusy() or recording() changed
         void shutterFired();                            // a photo started: sound and flash
         void recordingStarting();                       // record was tapped: start sound
-        void recordingProgress(long ms,long bytes);     // about once a second while recording
+        void recordingProgress(long ms,long bytes);     // about once a second while recording video
+        void timelapseProgress(int frames,long ms);     // about once a second during a time-lapse: frames kept, wall time
+        void captureWarning(String message);            // the run goes on, but the user should know (low battery)
         void soundSource(String source);                // where the recording's sound comes from: "camera mic", "off (…)"
-        void recordingEnded(String note);               // the file is finished: stop sound; note says why it stopped or failed, or null
+        void recordingEnded(String note);               // video or time-lapse finished: stop sound; note says why it stopped or failed, or null
         void lastSaved(Uri uri,boolean video,Bitmap thumb); // a photo or video was saved (or the newest one at startup); thumb may be null
         void captureFailed(String message);
     }
     private final Context context;
     private final MediaFiles files;
     private final Listener listener;
+    private final SharedPreferences prefs;
     private final Handler main=new Handler(Looper.getMainLooper()), io;
     private final HandlerThread ioThread=new HandlerThread("capture-io");
     private CameraHelper helper; // non-null while OPEN
     private Size stream;         // photos come out at the stream size, videos scaled into 1920 × 1080: the camera mode picked in MainActivity
     private String cameraName;   // USB product name, to find the camera's microphone
-    private Mode mode=Mode.PHOTO;
+    private Mode mode;
+    private int interval;        // time-lapse seconds, one of TimelapseRecorder.INTERVALS
     private PhotoCapture shot;   // at most one in flight: a 4K shot briefly needs ~100 MB (RGBA readback, Bitmap, JPEG)
     private VideoRecorder video; // the recording, until its file is finished
-    private boolean stopping;    // video was asked to stop
+    private TimelapseRecorder timelapse; // the time-lapse, until its last part is finished
+    private boolean stopping;    // the recording or time-lapse was asked to stop
     private boolean released;
 
     CaptureController(Context context,Listener listener) {
         this.context=context.getApplicationContext(); files=new MediaFiles(this.context); this.listener=listener;
+        prefs=this.context.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
+        try { mode=Mode.valueOf(prefs.getString("mode",Mode.PHOTO.name())); } catch(IllegalArgumentException e) { mode=Mode.PHOTO; }
+        interval=prefs.getInt("interval",5);
+        boolean known=false; for(int i:TimelapseRecorder.INTERVALS) known|=i==interval;
+        if(!known) interval=5;
         ioThread.start(); io=new Handler(ioThread.getLooper());
         io.post(() -> {
             files.deleteLeftovers();
@@ -53,24 +65,32 @@ final class CaptureController {
         });
     }
     Mode mode() { return mode; }
-    // In VIDEO mode the shutter starts a recording and stops it again; it is off while the file is being finished.
+    int interval() { return interval; }
+    // In VIDEO and TIMELAPSE mode the shutter starts a run and stops it again; it is off while the file is being finished.
     boolean canShoot() {
         if(released) return false;
-        if(video!=null) return !stopping;
+        if(video!=null || timelapse!=null) return !stopping;
         return helper!=null && shot==null;
     }
-    boolean isBusy() { return shot!=null || video!=null; }
-    boolean recording() { return video!=null; }
+    boolean isBusy() { return shot!=null || video!=null || timelapse!=null; }
+    boolean recording() { return video!=null || timelapse!=null; }
+    boolean timelapseRunning() { return timelapse!=null; }
+    // The stream: what photos come out at, and what the camera-mode hints compare against. null when the camera isn't open.
+    Size stream() { return stream; }
     // What the shutter makes at the current camera mode, e.g. "3840 × 2160", or for video "1920 × 1080\nfrom 2160p".
     String sizeLabel() {
         if(helper==null || stream==null) return null;
         if(mode==Mode.PHOTO) return stream.width+" × "+stream.height;
-        int[] v=VideoRecorder.fit(stream.width,stream.height);
+        int[] v=VideoRecorder.fit(stream.width,stream.height); // time-lapse too
         return v[0]+" × "+v[1]+(v[1]==stream.height?"":"\nfrom "+stream.height+"p");
     }
     void setMode(Mode m) {
         if(m==mode || isBusy() || released) return;
-        mode=m; listener.captureChanged();
+        mode=m; prefs.edit().putString("mode",m.name()).apply(); listener.captureChanged();
+    }
+    void setInterval(int seconds) {
+        if(seconds==interval || timelapse!=null || released) return;
+        interval=seconds; prefs.edit().putInt("interval",seconds).apply(); listener.captureChanged();
     }
 
     void onCameraOpen(CameraHelper owner,Size size,String name) { helper=owner; stream=size; cameraName=name; listener.captureChanged(); }
@@ -79,9 +99,9 @@ final class CaptureController {
     // library still delivers it, or deleted at its timeout. A recording stops and its file is finished on its own thread.
     void onCameraGone(String reason) {
         if(helper==null) return;
-        android.util.Log.i("UsbCameraLab","capture: camera gone ("+reason+")"+(shot!=null?", shot still finishing":"")+(video!=null?", recording stops":""));
+        android.util.Log.i("UsbCameraLab","capture: camera gone ("+reason+")"+(shot!=null?", shot still finishing":"")+(video!=null?", recording stops":"")+(timelapse!=null?", time-lapse stops":""));
         helper=null; stream=null;
-        stopVideo(APP_STOPPED.equals(reason)?"the app left the screen":"the camera stopped");
+        stopRun(APP_STOPPED.equals(reason)?"the app left the screen":"the camera stopped");
         listener.captureChanged();
     }
     void shutter() {
@@ -90,17 +110,23 @@ final class CaptureController {
             shot=new PhotoCapture(helper,files,main,io,this::shotDone);
             shot.start();
             listener.shutterFired();
-        } else if(video==null) {
+        } else if(recording()) stopRun(null);
+        else if(mode==Mode.TIMELAPSE) {
+            timelapse=new TimelapseRecorder(context,helper,files,stream,interval,main,timelapseEvents);
+            listener.recordingStarting();
+            timelapse.start();
+        } else {
             boolean sound=context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED;
             video=new VideoRecorder(context,helper,files,stream,cameraName,sound,main,recorderEvents);
             listener.recordingStarting();
             video.start();
-        } else stopVideo(null);
+        }
         listener.captureChanged();
     }
-    private void stopVideo(String reason) {
-        if(video==null || stopping) return;
-        stopping=true; video.stop(reason);
+    private void stopRun(String reason) {
+        if(stopping) return;
+        if(video!=null) video.stop(reason); else if(timelapse!=null) timelapse.stop(reason); else return;
+        stopping=true;
     }
     private void shotDone(PhotoCapture s,Uri saved,Bitmap thumb,String error) {
         if(s!=shot) return;
@@ -122,9 +148,23 @@ final class CaptureController {
             listener.captureChanged();
         }
     };
+    private final TimelapseRecorder.Events timelapseEvents=new TimelapseRecorder.Events() {
+        public void progress(TimelapseRecorder r,int frames,long ms) { if(r==timelapse && !released) listener.timelapseProgress(frames,ms); }
+        public void warning(TimelapseRecorder r,String message) { if(r==timelapse && !released) listener.captureWarning(message); }
+        public void partSaved(TimelapseRecorder r,Uri saved,Bitmap thumb) { if(r==timelapse && !released) listener.lastSaved(saved,true,thumb); }
+        public void finished(TimelapseRecorder r,Uri saved,Bitmap thumb,int parts,String why) {
+            if(r!=timelapse) return;
+            timelapse=null; stopping=false;
+            if(released) return;
+            if(saved!=null) listener.lastSaved(saved,true,thumb);
+            String what=parts>1?"The "+parts+" parts are saved.":"The video is saved.";
+            listener.recordingEnded(saved==null ? "Time-lapse not saved: "+why : why==null ? null : "Time-lapse stopped: "+why+". "+what);
+            listener.captureChanged();
+        }
+    };
     // The owner is going away. A shot in flight still finishes its file, and so does a recording; the io thread ends after the shot.
     void release() {
-        stopVideo("the app closed");
+        stopRun("the app closed");
         released=true; helper=null;
         if(shot==null) ioThread.quitSafely();
     }
