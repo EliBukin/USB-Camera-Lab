@@ -38,6 +38,8 @@
         <item name="colorSurfaceContainerHigh">#252B2E</item>
         <item name="colorSurfaceContainerHighest">#303539</item>
         <item name="android:windowBackground">@android:color/black</item>
+        <!-- Dialog windows (the mode sheet, the restore dialog) keep the system bars; the screen itself is edge-to-edge. -->
+        <item name="android:navigationBarColor">#171C1F</item>
         <!-- Styles the code asks for by attribute (views are built in Java, see M3.java). -->
         <item name="filterChipStyle">@style/Widget.Material3.Chip.Filter</item>
         <item name="dropdownMenuStyle">@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu</item>

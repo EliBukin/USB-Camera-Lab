@@ -9,7 +9,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.LayerDrawable;
@@ -17,37 +16,39 @@ import android.graphics.drawable.StateListDrawable;
 import android.media.MediaActionSound;
 import android.net.Uri;
 import android.os.Build;
-import android.text.SpannableString;
 import android.text.format.Formatter;
-import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
-import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.TextView;
-import android.widget.Toast;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.chip.Chip;
 import java.util.Locale;
 
-// The capture controls over the preview: last-capture thumbnail, shutter, the PHOTO / VIDEO / TIME-LAPSE switch, and the output
-// size or the time-lapse interval. Portrait: the switch in a strip above a row of thumbnail, shutter and size. Landscape: a column
-// along the end edge, where a 16:9 image leaves black bars at the sides in full screen. It also draws the shutter flash (`flash`
-// covers the preview box under `bar`), the recording status and camera-mode hint (`info`, at the top of the preview box) and the
-// dimmed screen (`dim`, over the whole window), plays the capture sounds, and asks for the microphone at the first recording and,
-// on Android 13+, for notifications at the first video or time-lapse.
-@SuppressLint("SetTextI18n") // English-only UI built in code, as in MainActivity
-final class CaptureBar implements CaptureController.Listener {
-    // What CaptureBar needs from the camera side of MainActivity.
+// The capture side of the screen, for the tab being shown (Photo, Video or Time-lapse): the shutter row under the panel in
+// portrait (thumbnail or Dim · shutter · Controls), a column at the end edge in landscape (Controls, interval, shutter,
+// thumbnail or Dim), the tab panels (CaptureTabs), and on the picture the run's timer, the sound source and, where there is no
+// panel, the hint. It also draws the shutter flash and the dimmed screen (`dim`, over the whole window), plays the capture
+// sounds, and asks for the microphone at the first recording and, on Android 13+, for notifications at the first video or
+// time-lapse. The tab chooses the capture mode; while a run goes on, the other tabs show their shutter off with "Go to …".
+@SuppressLint("SetTextI18n") // English-only UI built in code
+final class CaptureBar implements CaptureController.Listener, CaptureTabs.Host {
+    // What CaptureBar needs from the rest of MainActivity.
     interface Host {
-        void busyChanged();                        // isBusy() may have changed: the camera-mode picker follows
+        void busyChanged();                        // isBusy() or recording() may have changed: picker lock, badges, Home
         Hint hint(CaptureController.Mode mode);    // a camera mode that suits this capture mode better, or null
         boolean canLock();                         // the camera has auto exposure, white balance or focus
         void lockAuto();                           // turns them off at their current values, before a time-lapse
         void runEnded();                           // a video or time-lapse finished: offer to turn them back on
+        void openControls();                       // the Controls button: the controls sheet
+        void goTo(CaptureController.Mode mode);    // "Go to Time-lapse": select that tab
+        void message(String text,String action,Runnable onTap); // a snackbar
     }
     // "4K video is choppy" + "Switch to 1080p", and what the tap does.
     static final class Hint {
@@ -55,114 +56,97 @@ final class CaptureBar implements CaptureController.Listener {
         Hint(String text,String action,Runnable apply) { this.text=text; this.action=action; this.apply=apply; }
     }
     static final int MIC_REQUEST=2, NOTIFY_REQUEST=3; // MainActivity forwards these permission results to micAnswered, notifyAnswered
-    private static final int RED=0xffe53935, MUTED=0xffc8d2da, ACCENT=0xff7fc4e0;
     private static final float DIM=0.01f; // window brightness while dimmed; the device setting is untouched
     final FrameLayout bar,dim;
-    final View flash;
-    final LinearLayout info;
+    final CaptureTabs tabs;
     private final Activity activity;
     private final Host host;
+    private final PreviewHost preview;
     private final SharedPreferences prefs;
     private final ImageView thumb;
-    private final TextView dimButton;
+    private final MaterialButton dimButton, controls;
+    private final Chip interval;
     private final View shutter;
     private final Drawable photoLook,recordLook,timelapseLook,stopLook;
-    private final LinearLayout switcher,side;
-    private final TextView interval,size,timer,soundChip,hint,dimText;
+    private final TextView dimText;
     private final MediaActionSound sound=new MediaActionSound();
     private CaptureController controller;
-    private Hint shownHint;
+    private CaptureController.Mode tab;    // the capture tab shown, or null on Home
+    private boolean compact, landscape, fullScreen; // compact: no panel (landscape or full screen), the picture's pills say it
     private Uri last;
-    private boolean lastVideo, lock, dimmed;
+    private boolean lastVideo, lock, dimmed, runSaved;
     private int navigationColor; // the window's, while dimmed
-    private String warning; // shown on the dimmed screen
+    private String warning, soundSource; // the run's: shown on the dimmed screen, the panels and the picture
+    private int frames;
+    private long runMs, runBytes;
 
-    CaptureBar(Activity activity,Host host) {
-        this.activity=activity; this.host=host;
+    CaptureBar(Activity activity,PreviewHost preview,Host host) {
+        this.activity=activity; this.preview=preview; this.host=host;
         prefs=activity.getSharedPreferences(CaptureController.PREFS,Context.MODE_PRIVATE);
         lock=prefs.getBoolean("lock",false);
         sound.load(MediaActionSound.SHUTTER_CLICK); sound.load(MediaActionSound.START_VIDEO_RECORDING); sound.load(MediaActionSound.STOP_VIDEO_RECORDING);
-        flash=new View(activity); flash.setBackgroundColor(0xffffffff); flash.setAlpha(0f); flash.setVisibility(View.INVISIBLE);
+        tabs=new CaptureTabs(activity,this);
         bar=new FrameLayout(activity);
         thumb=new ImageView(activity); thumb.setScaleType(ImageView.ScaleType.CENTER_CROP); thumb.setVisibility(View.INVISIBLE);
-        GradientDrawable frame=new GradientDrawable(); frame.setCornerRadius(dp(8)); frame.setColor(0xff38444f); frame.setStroke(dp(2),0xffffffff);
+        GradientDrawable frame=new GradientDrawable(); frame.setCornerRadius(dp(14)); frame.setColor(0xff38444f); frame.setStroke(dp(2),0xffffffff);
         thumb.setBackground(frame); thumb.setClipToOutline(true); thumb.setPadding(dp(2),dp(2),dp(2),dp(2));
         thumb.setOnClickListener(v -> open());
-        // In the thumbnail's place during a time-lapse: opening the gallery would leave the app and end the run.
-        dimButton=label("Dim",13); dimButton.setTypeface(Typeface.DEFAULT_BOLD); dimButton.setVisibility(View.GONE);
-        GradientDrawable dimBack=new GradientDrawable(); dimBack.setCornerRadius(dp(8)); dimBack.setColor(0xcc101820); dimBack.setStroke(dp(2),0xffffffff);
-        dimButton.setBackground(dimBack); dimButton.setContentDescription("Dim the screen");
+        // In the thumbnail's place during a time-lapse.
+        dimButton=M3.tonalButton(activity,"Dim",R.drawable.ic_dim); dimButton.setVisibility(View.GONE); dimButton.setContentDescription("Dim the screen");
         dimButton.setOnClickListener(v -> setDimmed(true));
+        controls=new MaterialButton(activity,null,R.attr.materialIconButtonFilledTonalStyle); controls.setIconResource(R.drawable.ic_tune);
+        controls.setContentDescription("Camera controls"); controls.setOnClickListener(v -> host.openControls());
+        interval=new Chip(activity); interval.setOnClickListener(v -> chooseInterval()); interval.setChipIconResource(R.drawable.ic_timer); interval.setChipIconVisible(true);
+        interval.setCloseIconResource(R.drawable.ic_expand_more); interval.setCloseIconVisible(true); interval.setOnCloseIconClickListener(v -> chooseInterval());
         shutter=new View(activity);
         photoLook=pressable(ringed(disc(0xffffffff),7),ringed(disc(0xffaab4bd),7));
-        recordLook=pressable(ringed(disc(RED),7),ringed(disc(0xffa82a27),7));
-        timelapseLook=pressable(dashed(ringed(disc(RED),7)),dashed(ringed(disc(0xffa82a27),7)));
-        stopLook=pressable(ringed(square(RED),19),ringed(square(0xffa82a27),19));
+        recordLook=pressable(ringed(disc(M3.REC),7),ringed(disc(0xffa82a27),7));
+        timelapseLook=pressable(dashed(ringed(disc(M3.REC),7)),dashed(ringed(disc(0xffa82a27),7)));
+        stopLook=pressable(ringed(square(M3.REC),19),ringed(square(0xffa82a27),19));
         shutter.setOnClickListener(v -> press());
-        switcher=new LinearLayout(activity); switcher.setGravity(Gravity.CENTER);
-        // One label per mode, the current one bright.
-        for(CaptureController.Mode m:CaptureController.Mode.values()) {
-            String name=m==CaptureController.Mode.TIMELAPSE?"TIME-LAPSE":m.name();
-            TextView t=label(name,13); t.setTypeface(Typeface.DEFAULT_BOLD); t.setLetterSpacing(0.08f); t.setTag(m);
-            t.setMinHeight(dp(32)); t.setPadding(dp(7),0,dp(7),0);
-            t.setContentDescription(name.toLowerCase(Locale.US)+" mode");
-            t.setOnClickListener(v -> { if(controller!=null) controller.setMode(m); });
-            switcher.addView(t);
-        }
-        side=new LinearLayout(activity); side.setOrientation(LinearLayout.VERTICAL); side.setGravity(Gravity.CENTER);
-        interval=pill(); interval.setTextSize(12); interval.setOnClickListener(v -> chooseInterval());
-        side.addView(interval,new LinearLayout.LayoutParams(-2,-2)); // a vertical LinearLayout would stretch it to the size label
-        size=label("",11); size.setTextColor(MUTED);
-        LinearLayout.LayoutParams below=new LinearLayout.LayoutParams(-2,-2); below.topMargin=dp(3); side.addView(size,below);
-        bar.addView(thumb); bar.addView(dimButton); bar.addView(shutter); bar.addView(switcher); bar.addView(side);
-        info=new LinearLayout(activity); info.setOrientation(LinearLayout.VERTICAL); info.setGravity(Gravity.CENTER); info.setVisibility(View.GONE);
-        hint=pill(); hint.setMaxWidth(dp(300)); hint.setOnClickListener(v -> { if(shownHint!=null) shownHint.apply.run(); });
-        timer=pill(); soundChip=pill();
-        info.addView(hint,new LinearLayout.LayoutParams(-2,-2)); info.addView(timer,gap()); info.addView(soundChip,gap());
+        bar.addView(thumb); bar.addView(dimButton); bar.addView(controls); bar.addView(interval); bar.addView(shutter);
         dim=new FrameLayout(activity); dim.setBackgroundColor(0xff000000); dim.setVisibility(View.GONE);
         dim.setContentDescription("Screen dimmed. Tap to wake.");
         dim.setOnClickListener(v -> wake());
-        dimText=label("",11); dimText.setTextColor(0xff59636b); dimText.setShadowLayer(0,0,0,0);
+        dimText=new TextView(activity); dimText.setTextColor(0xff59636b); dimText.setTextSize(11); dimText.setGravity(Gravity.CENTER);
         dim.addView(dimText,new FrameLayout.LayoutParams(-2,-2,Gravity.CENTER_HORIZONTAL));
+        arrange(false,false);
         captureChanged();
     }
     void attach(CaptureController c) { controller=c; captureChanged(); }
     void release() { sound.release(); }
-    void arrange(boolean landscape) {
-        int edge=dp(14);
+    // The tab shown: null on Home.
+    void show(CaptureController.Mode mode) {
+        tab=mode;
+        tabs.photo.setVisibility(mode==CaptureController.Mode.PHOTO?View.VISIBLE:View.GONE);
+        tabs.video.setVisibility(mode==CaptureController.Mode.VIDEO?View.VISIBLE:View.GONE);
+        tabs.timelapse.setVisibility(mode==CaptureController.Mode.TIMELAPSE?View.VISIBLE:View.GONE);
+        captureChanged();
+    }
+    // Portrait: a row of thumbnail (or Dim), shutter, Controls, 112 dp tall. Landscape: a column, Controls at the top, the shutter
+    // in the middle, the thumbnail (or Dim) at the bottom, and the interval chip above the shutter on the Time-lapse tab.
+    void arrange(boolean landscape,boolean fullScreen) {
+        this.landscape=landscape; this.fullScreen=fullScreen; compact=landscape || fullScreen;
+        int edge=dp(landscape?16:32);
         GradientDrawable scrim=new GradientDrawable(landscape?GradientDrawable.Orientation.RIGHT_LEFT:GradientDrawable.Orientation.BOTTOM_TOP,new int[]{0x99000000,0x00000000});
-        bar.setBackground(scrim);
-        bar.setLayoutParams(landscape?new FrameLayout.LayoutParams(dp(108),-1,Gravity.END):new FrameLayout.LayoutParams(-1,dp(110),Gravity.BOTTOM));
-        switcher.setOrientation(landscape?LinearLayout.VERTICAL:LinearLayout.HORIZONTAL);
-        FrameLayout.LayoutParams m=new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL);
-        if(landscape) m.topMargin=dp(10);
-        switcher.setLayoutParams(m);
-        if(landscape) {
-            // Top to bottom: modes, shutter, interval or size (resting on the thumbnail), thumbnail.
-            shutter.setLayoutParams(new FrameLayout.LayoutParams(dp(60),dp(60),Gravity.CENTER));
-            FrameLayout.LayoutParams s=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL); s.bottomMargin=edge+dp(46+6);
-            side.setLayoutParams(s);
-            FrameLayout.LayoutParams t=new FrameLayout.LayoutParams(dp(46),dp(46),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL); t.bottomMargin=edge;
-            thumb.setLayoutParams(t); dimButton.setLayoutParams(new FrameLayout.LayoutParams(t));
-        } else {
-            // The modes strip on top, then a 76 dp row: thumbnail, shutter, interval or size.
-            FrameLayout.LayoutParams sh=new FrameLayout.LayoutParams(dp(60),dp(60),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL); sh.bottomMargin=dp(8);
-            shutter.setLayoutParams(sh);
-            FrameLayout.LayoutParams t=new FrameLayout.LayoutParams(dp(46),dp(46),Gravity.BOTTOM|Gravity.START); t.setMarginStart(edge); t.bottomMargin=dp(15);
-            thumb.setLayoutParams(t); dimButton.setLayoutParams(new FrameLayout.LayoutParams(t));
-            FrameLayout.LayoutParams s=new FrameLayout.LayoutParams(-2,dp(76),Gravity.BOTTOM|Gravity.END); s.setMarginEnd(edge);
-            side.setLayoutParams(s);
-        }
-        // The status and hint centre over the image left of the column, not under it. A centred child moves by its whole end
-        // margin, so half the column's width centres it in the rest.
-        if(info.getLayoutParams() instanceof FrameLayout.LayoutParams) {
-            FrameLayout.LayoutParams i=(FrameLayout.LayoutParams)info.getLayoutParams(); i.setMarginEnd(landscape?dp(54):0); info.setLayoutParams(i);
-        }
+        bar.setBackground(landscape || fullScreen?scrim:null);
+        int shutterSize=dp(landscape?68:76);
+        shutter.setLayoutParams(new FrameLayout.LayoutParams(shutterSize,shutterSize,Gravity.CENTER));
+        FrameLayout.LayoutParams t=new FrameLayout.LayoutParams(dp(52),dp(52),landscape?Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL:Gravity.CENTER_VERTICAL|Gravity.START);
+        FrameLayout.LayoutParams d=new FrameLayout.LayoutParams(-2,dp(48),landscape?Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL:Gravity.CENTER_VERTICAL|Gravity.START);
+        FrameLayout.LayoutParams c=new FrameLayout.LayoutParams(dp(52),dp(52),landscape?Gravity.TOP|Gravity.CENTER_HORIZONTAL:Gravity.CENTER_VERTICAL|Gravity.END);
+        FrameLayout.LayoutParams i=new FrameLayout.LayoutParams(-2,-2,Gravity.CENTER);
+        if(landscape) { t.bottomMargin=edge; d.bottomMargin=edge; c.topMargin=edge; i.bottomMargin=shutterSize+dp(16); }
+        else { t.setMarginStart(edge); d.setMarginStart(edge-dp(8)); c.setMarginEnd(edge); }
+        thumb.setLayoutParams(t); dimButton.setLayoutParams(d); controls.setLayoutParams(c); interval.setLayoutParams(i);
+        controls.setInsetTop(0); controls.setInsetBottom(0); controls.setIconSize(dp(24));
+        captureChanged();
     }
 
     private void press() {
         if(controller==null) return;
         boolean idle=!controller.recording() && controller.canShoot();
+        shutter.performHapticFeedback(Build.VERSION.SDK_INT>=30?HapticFeedbackConstants.CONFIRM:HapticFeedbackConstants.VIRTUAL_KEY);
         if(controller.mode()!=CaptureController.Mode.PHOTO && idle && askNotifications()) return;
         if(controller.mode()==CaptureController.Mode.VIDEO && idle && askMic()) return;
         if(controller.mode()==CaptureController.Mode.TIMELAPSE && idle && lock && host.canLock()) host.lockAuto();
@@ -178,7 +162,7 @@ final class CaptureBar implements CaptureController.Listener {
     }
     void micAnswered(int[] results) {
         if(results.length==0) { prefs.edit().putBoolean("micAsked",false).apply(); return; } // interrupted: ask next time
-        if(results[0]!=PackageManager.PERMISSION_GRANTED) Toast.makeText(activity,"Recording without sound. To record sound, allow the microphone in the app's settings.",Toast.LENGTH_LONG).show();
+        if(results[0]!=PackageManager.PERMISSION_GRANTED) host.message("Recording without sound. To record sound, allow the microphone in the app's settings.",null,null);
         if(controller!=null && controller.mode()==CaptureController.Mode.VIDEO && !controller.recording()) controller.shutter();
     }
     // Android 13+: the notification that shows a video or time-lapse going on while the app is away needs a permission. Asked once,
@@ -194,7 +178,7 @@ final class CaptureBar implements CaptureController.Listener {
         if(results.length==0) { prefs.edit().putBoolean("notifyAsked",false).apply(); return; } // interrupted: ask next time
         if(controller!=null && !controller.recording()) press(); // the microphone may be asked next
     }
-    // The interval presets, each with what an hour becomes, and the exposure lock.
+    // Landscape has no panel: the interval chip in the column opens the presets, each with what an hour becomes, and the lock.
     private void chooseInterval() {
         if(controller==null || controller.recording()) return;
         PopupMenu menu=new PopupMenu(activity,interval);
@@ -204,79 +188,111 @@ final class CaptureBar implements CaptureController.Listener {
         if(host.canLock()) menu.getMenu().add(2,Menu.NONE,all.length,"Lock exposure / WB / focus").setCheckable(true).setChecked(lock);
         menu.setOnMenuItemClickListener((MenuItem item) -> {
             if(item.getGroupId()==1) controller.setInterval(all[item.getItemId()]);
-            else { lock=!lock; prefs.edit().putBoolean("lock",lock).apply(); captureChanged(); }
+            else lockChanged(!lock);
             return true;
         });
         menu.show();
     }
+    @Override public void intervalPicked(int seconds) { if(controller!=null) controller.setInterval(seconds); }
+    @Override public void lockChanged(boolean on) { lock=on; prefs.edit().putBoolean("lock",lock).apply(); captureChanged(); }
     // Seconds of 30 fps video per hour of time-lapse: "24 s", "2 min", "0.4 s".
     static String perHour(int seconds) {
         double s=3600.0/seconds/TimelapseRecorder.FPS;
         if(s>=60 && s%60==0) return (int)s/60+" min";
         return (s==Math.rint(s)?String.valueOf((int)s):String.format(Locale.US,"%.1f",s))+" s";
     }
+    private static String name(CaptureController.Mode m) { return m==CaptureController.Mode.TIMELAPSE?"Time-lapse":m==CaptureController.Mode.VIDEO?"Video":"Photo"; }
 
     public void captureChanged() {
         boolean on=controller!=null && controller.canShoot(), busy=controller!=null && controller.isBusy();
         CaptureController.Mode mode=controller==null?CaptureController.Mode.PHOTO:controller.mode();
-        boolean recording=controller!=null && controller.recording(), timelapse=mode==CaptureController.Mode.TIMELAPSE;
-        boolean lapsing=controller!=null && controller.timelapseRunning();
-        shutter.setBackground(recording?stopLook:mode==CaptureController.Mode.PHOTO?photoLook:timelapse?timelapseLook:recordLook);
-        shutter.setContentDescription(recording?(lapsing?"Stop the time-lapse":"Stop recording"):mode==CaptureController.Mode.PHOTO?"Take a photo":timelapse?"Start the time-lapse":"Start recording");
-        shutter.setEnabled(on); shutter.setAlpha(on?1f:0.35f);
-        String s=controller==null?null:controller.sizeLabel();
-        size.setText(s==null?"":s); size.setVisibility(s==null?View.GONE:View.VISIBLE);
-        if(timelapse && controller!=null && !lapsing) {
+        boolean recording=controller!=null && controller.recording(), lapsing=controller!=null && controller.timelapseRunning();
+        CaptureController.Mode shown=tab==null?mode:tab;
+        boolean ours=shown==mode; // this tab's capture is the controller's: while another one runs, the shutter is off
+        boolean timelapse=shown==CaptureController.Mode.TIMELAPSE;
+        shutter.setBackground(ours && recording?stopLook:shown==CaptureController.Mode.PHOTO?photoLook:timelapse?timelapseLook:recordLook);
+        shutter.setContentDescription(ours && recording?(lapsing?"Stop the time-lapse":"Stop recording"):shown==CaptureController.Mode.PHOTO?"Take a photo":timelapse?"Start the time-lapse":"Start recording");
+        boolean enabled=on && ours;
+        shutter.setEnabled(enabled); shutter.setAlpha(enabled?1f:0.35f);
+        boolean dimHere=lapsing && timelapse;
+        thumb.setVisibility(dimHere || last==null?View.INVISIBLE:View.VISIBLE);
+        dimButton.setVisibility(dimHere?View.VISIBLE:View.GONE);
+        controls.setVisibility(fullScreen?View.GONE:View.VISIBLE);
+        if(controller!=null) {
             int every=controller.interval();
-            SpannableString t=new SpannableString("Every "+TimelapseRecorder.every(every)+" ▾\n1 h → "+perHour(every)+(lock && host.canLock()?"\nlocked":""));
-            t.setSpan(new ForegroundColorSpan(MUTED),t.toString().indexOf('\n'),t.length(),0);
-            interval.setText(t); interval.setContentDescription("Time-lapse interval: every "+TimelapseRecorder.every(every)+". An hour makes "+perHour(every)+" of video."+(lock && host.canLock()?" Exposure, white balance and focus lock at the start.":"")+" Tap to change.");
-            interval.setEnabled(!busy); interval.setVisibility(View.VISIBLE);
-            size.setVisibility(View.GONE); // no room under the interval; the run shows the size, the hint tells about larger streams
-        } else interval.setVisibility(View.GONE);
-        for(int i=0;i<switcher.getChildCount();i++) {
-            View v=switcher.getChildAt(i); boolean current=v.getTag()==mode;
-            v.setEnabled(!busy); v.setAlpha(current?1f:busy?0.25f:0.55f);
+            interval.setText(TimelapseRecorder.every(every));
+            interval.setContentDescription("Time-lapse interval: every "+TimelapseRecorder.every(every)+". An hour makes "+perHour(every)+" of video."+(lock && host.canLock()?" Exposure, white balance and focus lock at the start.":"")+" Tap to change.");
         }
-        thumb.setVisibility(lapsing || last==null?View.INVISIBLE:View.VISIBLE);
-        dimButton.setVisibility(lapsing?View.VISIBLE:View.GONE);
-        shownHint=recording || mode==CaptureController.Mode.PHOTO || controller==null || controller.stream()==null?null:host.hint(mode);
-        if(shownHint!=null) {
-            SpannableString t=new SpannableString(shownHint.text+"\n"+shownHint.action);
-            t.setSpan(new ForegroundColorSpan(ACCENT),shownHint.text.length()+1,t.length(),0);
-            hint.setText(t); hint.setContentDescription(shownHint.text+" "+shownHint.action+".");
+        interval.setVisibility(landscape && !fullScreen && timelapse && !lapsing?View.VISIBLE:View.GONE);
+        interval.setEnabled(!busy);
+        // The panels.
+        String size=controller==null?null:controller.sizeLabel();
+        tabs.photo(controller==null || controller.stream()==null?null:controller.stream().width+" × "+controller.stream().height);
+        tabs.output(size);
+        if(!recording || mode!=CaptureController.Mode.VIDEO) soundIdle();
+        tabs.timelapse(lapsing,controller==null?5:controller.interval(),size,host.canLock(),lock,busy);
+        Hint hint=recording || controller==null || controller.stream()==null?null:host.hint(shown);
+        Hint videoHint=hint!=null && shown==CaptureController.Mode.VIDEO?hint:null, lapseHint=hint!=null && timelapse?hint:null;
+        if(videoHint!=null) tabs.videoHint.show(activity,1,R.drawable.ic_info,videoHint.text,videoHint.action,videoHint.apply); else tabs.videoHint.hide();
+        if(lapseHint!=null) tabs.lapseHint.show(activity,2,R.drawable.ic_battery_alert,lapseHint.text,lapseHint.action,lapseHint.apply); else tabs.lapseHint.hide();
+        String goTo=recording && !ours?(lapsing?"A time-lapse is running.":"A video is recording."):null;
+        for(M3.Banner b:new M3.Banner[]{tabs.photoGoTo,tabs.videoGoTo,tabs.lapseGoTo}) {
+            if(goTo==null) b.hide(); else b.show(activity,0,R.drawable.ic_info,goTo+" This tab's shutter is off until it stops.","Go to "+name(mode),() -> host.goTo(mode));
         }
-        hint.setVisibility(shownHint==null?View.GONE:View.VISIBLE);
-        timer.setVisibility(recording?View.VISIBLE:View.GONE);
-        if(!recording) { soundChip.setVisibility(View.GONE); warning=null; }
-        info.setVisibility(recording || shownHint!=null?View.VISIBLE:View.GONE);
+        if(lapsing && warning!=null) tabs.lapseWarning.show(activity,2,R.drawable.ic_warning,warning,null,null); else tabs.lapseWarning.hide();
+        // The picture: the run's pill, its sound source, and where there is no panel, the hint or "Go to …".
+        preview.setRunning(recording);
+        renderRun();
+        boolean pills=tab!=null && compact;
+        if(pills && goTo!=null) hintPill(goTo,"Go to "+name(mode),() -> host.goTo(mode));
+        else if(pills && hint!=null) hintPill(hint.text,hint.action,hint.apply);
+        else preview.hint.setVisibility(View.GONE);
+        if(!recording) { warning=null; soundSource=null; }
         if(!lapsing) wake();
         host.busyChanged();
     }
+    private void hintPill(String text,String action,Runnable apply) {
+        android.text.SpannableString t=new android.text.SpannableString(text+"\n"+action);
+        t.setSpan(new android.text.style.ForegroundColorSpan(M3.color(activity,R.attr.colorPrimary)),text.length()+1,t.length(),0);
+        preview.hint.setText(t); preview.hint.setContentDescription(text+" "+action+".");
+        preview.hint.setOnClickListener(v -> apply.run());
+        preview.hint.setVisibility(View.VISIBLE);
+    }
+    // Before a recording: what the sound will be.
+    private void soundIdle() {
+        if(activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED) tabs.sound("Sound: camera mic or phone mic","The camera's own mic when Android lists it, else the phone's");
+        else if(prefs.getBoolean("micAsked",false)) tabs.sound("Sound: off","The microphone isn't allowed; allow it in the app's settings to record sound");
+        else tabs.sound("Sound: on","Asks for the microphone at the first recording");
+    }
+    // The run's pill on the picture. Its own tab: "● 01:23 · 145 MB", "● Frame 154 · every 5 s" (with the video so far and the
+    // elapsed time where there is no panel). Other tabs and Home: "● Video · 01:23", "● Time-lapse · frame 154".
+    private void renderRun() {
+        if(controller==null || !controller.recording()) { preview.run.setVisibility(View.GONE); preview.sound.setVisibility(View.GONE); return; }
+        boolean lapsing=controller.timelapseRunning(), own=tab==controller.mode();
+        String text;
+        if(lapsing) text=own?"● Frame "+frames+" · every "+TimelapseRecorder.every(controller.interval())+(compact?"\n"+TimelapseRecorder.length(frames)+" of video · "+clock(runMs)+" elapsed":""):"● Time-lapse · frame "+frames;
+        else text=own?"● "+clock(runMs)+" · "+Formatter.formatShortFileSize(activity,runBytes):"● Video · "+clock(runMs);
+        preview.run.setText(text); preview.run.setVisibility(View.VISIBLE);
+        boolean showSound=!lapsing && own && compact && soundSource!=null;
+        preview.sound.setText(soundSource==null?"":soundSource); preview.sound.setVisibility(showSound?View.VISIBLE:View.GONE);
+    }
     public void shutterFired() {
         sound.play(MediaActionSound.SHUTTER_CLICK);
-        flash.animate().cancel(); flash.setVisibility(View.VISIBLE); flash.setAlpha(0.85f);
-        flash.animate().alpha(0f).setDuration(220).withEndAction(() -> flash.setVisibility(View.INVISIBLE)).start();
+        preview.showFlash();
     }
     public void recordingStarting() {
         sound.play(MediaActionSound.START_VIDEO_RECORDING);
+        runSaved=false; soundSource=null; warning=null;
         if(controller!=null && controller.mode()==CaptureController.Mode.TIMELAPSE) timelapseProgress(0,0); else recordingProgress(0,0);
-        soundChip.setVisibility(View.GONE);
     }
-    public void recordingProgress(long ms,long bytes) {
-        SpannableString t=new SpannableString("● "+clock(ms)+" · "+Formatter.formatShortFileSize(activity,bytes));
-        t.setSpan(new ForegroundColorSpan(0xffff5a52),0,1,0);
-        timer.setText(t);
-    }
-    // "● Frame 154 · every 5 s / 0:05 of video · 12:50 elapsed"
-    public void timelapseProgress(int frames,long ms) {
+    public void recordingProgress(long ms,long bytes) { runMs=ms; runBytes=bytes; renderRun(); }
+    // "Time-lapse · frame 154 · 12:50 elapsed" on the dimmed screen too.
+    public void timelapseProgress(int n,long ms) {
         if(controller==null) return;
-        String every="every "+TimelapseRecorder.every(controller.interval()), video=TimelapseRecorder.length(frames)+" of video", elapsed=clock(ms)+" elapsed";
-        SpannableString t=new SpannableString("● Frame "+frames+" · "+every+"\n"+video+" · "+elapsed);
-        t.setSpan(new ForegroundColorSpan(0xffff5a52),0,1,0);
-        timer.setText(t);
+        frames=n; runMs=ms;
+        renderRun(); tabs.timelapseProgress(n,ms);
         // Dimmed: one dark line that moves a little every minute, so nothing stays lit in one place for hours.
-        dimText.setText("Time-lapse · frame "+frames+" · "+elapsed+(warning==null?"":"\n"+warning)+"\nTap to wake");
+        dimText.setText("Time-lapse · frame "+n+" · "+clock(ms)+" elapsed"+(warning==null?"":"\n"+warning)+"\nTap to wake");
         FrameLayout.LayoutParams p=(FrameLayout.LayoutParams)dimText.getLayoutParams();
         int step=(int)(ms/60_000%8), top=dp(120)+step*dp(48);
         if(p.topMargin!=top) { p.topMargin=top; dimText.setLayoutParams(p); }
@@ -284,24 +300,35 @@ final class CaptureBar implements CaptureController.Listener {
     public void captureWarning(String message) {
         warning=message;
         android.util.Log.w("UsbCameraLab",message);
-        Toast.makeText(activity,message,Toast.LENGTH_LONG).show();
+        host.message(message,null,null);
+        captureChanged();
     }
-    public void soundSource(String source) { soundChip.setText("Sound: "+source); soundChip.setVisibility(View.VISIBLE); }
+    // "phone mic (camera mic is silent)": "Sound: phone mic" over "Camera mic is silent".
+    public void soundSource(String source) {
+        soundSource=source;
+        int open=source.indexOf(" (");
+        String what=open<0?source:source.substring(0,open), why=open<0?null:source.substring(open+2,source.length()-1);
+        tabs.sound("Sound: "+what,why==null?null:Character.toUpperCase(why.charAt(0))+why.substring(1));
+        renderRun();
+    }
     public void recordingEnded(String note) {
         sound.play(MediaActionSound.STOP_VIDEO_RECORDING);
         wake();
-        if(note!=null) { android.util.Log.i("UsbCameraLab",note); Toast.makeText(activity,note,Toast.LENGTH_LONG).show(); }
+        boolean lapse=controller!=null && controller.mode()==CaptureController.Mode.TIMELAPSE;
+        if(note!=null) android.util.Log.i("UsbCameraLab",note);
+        String text=note!=null?note:lapse?"Time-lapse saved":"Video saved";
+        host.message(text,runSaved && last!=null?"View":null,this::open);
         host.runEnded();
     }
     public void lastSaved(Uri uri,boolean video,Bitmap picture) {
-        last=uri; lastVideo=video;
-        if(controller==null || !controller.timelapseRunning()) thumb.setVisibility(View.VISIBLE);
+        last=uri; lastVideo=video; if(video) runSaved=true;
         thumb.setContentDescription(video?"Open the last video":"Open the last photo");
         if(picture!=null) thumb.setImageBitmap(picture); else thumb.setImageDrawable(null);
+        captureChanged();
     }
     public void captureFailed(String message) {
         android.util.Log.w("UsbCameraLab",message);
-        Toast.makeText(activity,message,Toast.LENGTH_LONG).show();
+        host.message(message,null,null);
     }
     // Dimmed: the window at its lowest brightness under a black cover, the navigation bar black too. Only this window changes;
     // the device setting stays.
@@ -322,7 +349,7 @@ final class CaptureBar implements CaptureController.Listener {
     private void open() {
         if(last==null) return;
         try { activity.startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(last,lastVideo?"video/mp4":"image/jpeg").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)); }
-        catch(ActivityNotFoundException e) { Toast.makeText(activity,lastVideo?"No app here can play videos":"No app here can show photos",Toast.LENGTH_LONG).show(); }
+        catch(ActivityNotFoundException e) { host.message(lastVideo?"No app here can play videos":"No app here can show photos",null,null); }
     }
 
     static String clock(long ms) {
@@ -330,15 +357,6 @@ final class CaptureBar implements CaptureController.Listener {
         return s>=3600?String.format(Locale.US,"%d:%02d:%02d",s/3600,s/60%60,s%60):String.format(Locale.US,"%02d:%02d",s/60,s%60);
     }
     private int dp(int value) { return Math.round(value*activity.getResources().getDisplayMetrics().density); }
-    private LinearLayout.LayoutParams gap() { LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2); p.topMargin=dp(6); return p; }
-    private TextView label(String value,int sp) {
-        TextView t=new TextView(activity); t.setText(value); t.setTextColor(0xffffffff); t.setTextSize(sp); t.setGravity(Gravity.CENTER);
-        t.setShadowLayer(4,0,1,0xcc000000); return t;
-    }
-    private TextView pill() {
-        TextView t=label("",13); GradientDrawable back=new GradientDrawable(); back.setCornerRadius(dp(14)); back.setColor(0x99000000);
-        t.setBackground(back); t.setPadding(dp(10),dp(4),dp(10),dp(4)); t.setVisibility(View.GONE); return t;
-    }
     private static Drawable pressable(Drawable normal,Drawable pressed) {
         StateListDrawable d=new StateListDrawable(); d.addState(new int[]{android.R.attr.state_pressed},pressed); d.addState(new int[0],normal); return d;
     }
@@ -346,14 +364,14 @@ final class CaptureBar implements CaptureController.Listener {
     private GradientDrawable square(int fill) { GradientDrawable d=new GradientDrawable(); d.setCornerRadius(dp(4)); d.setColor(fill); return d; }
     // A white ring around `inner`, inset by `gap` dp.
     private Drawable ringed(Drawable inner,int gap) {
-        GradientDrawable ring=new GradientDrawable(); ring.setShape(GradientDrawable.OVAL); ring.setStroke(dp(3),0xffffffff);
+        GradientDrawable ring=new GradientDrawable(); ring.setShape(GradientDrawable.OVAL); ring.setStroke(dp(4),0xffffffff);
         LayerDrawable d=new LayerDrawable(new Drawable[]{ring,inner}); int g=dp(gap); d.setLayerInset(1,g,g,g,g);
         return d;
     }
     // The time-lapse button: a dashed white ring, like a clock's marks, on the record button.
     private Drawable dashed(Drawable button) {
         GradientDrawable marks=new GradientDrawable(); marks.setShape(GradientDrawable.OVAL); marks.setStroke(dp(2),0xffffffff,dp(3),dp(3));
-        LayerDrawable d=new LayerDrawable(new Drawable[]{button,marks}); int g=dp(16); d.setLayerInset(1,g,g,g,g);
+        LayerDrawable d=new LayerDrawable(new Drawable[]{button,marks}); int g=dp(18); d.setLayerInset(1,g,g,g,g);
         return d;
     }
 }
