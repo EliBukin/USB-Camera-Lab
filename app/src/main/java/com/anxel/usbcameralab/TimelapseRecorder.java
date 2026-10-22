@@ -38,7 +38,8 @@ final class TimelapseRecorder {
     static final int FPS=30;
     static final int[] INTERVALS={1,2,5,10,30,60,300}; // seconds
     private static final String MIME=MediaFormat.MIMETYPE_VIDEO_AVC;
-    private static final long PART_MS=60*60_000L, TICK_MS=1000, EOS_WAIT_MS=3000;
+    static final long PART_MS=60*60_000L; // a new file (part) every hour of the run
+    private static final long TICK_MS=1000, EOS_WAIT_MS=3000;
     private static final int SPACE_EVERY=5, BATTERY_EVERY=10, LOG_EVERY=600; // ticks between checks, and between status lines in the log
     private static final int BATTERY_WARN=20, BATTERY_STOP=10;  // percent, while not charging
     final CameraHelper owner; // the session it records; the controller compares it like Events.stale()
