@@ -49,8 +49,12 @@ final class ControlsSheet {
     }
     boolean isOpen() { return open; }
 
-    // Rotation: a bottom sheet in portrait, a side sheet in landscape. An open sheet stays open.
+    // Rotation: a bottom sheet in portrait, a side sheet in landscape. An open sheet stays open. Called on every arrange and
+    // insets change: the behavior is made only when the sheet turns into a bottom sheet. A new behavior asks for the window
+    // insets again at its first layout, so making one here each time would loop (and reset every drag).
     void arrange(boolean landscape,int bottomInset) {
+        scroll.setPadding(0,0,0,landscape?M3.dp(context,8):bottomInset+M3.dp(context,8));
+        if(landscape==this.landscape && (landscape || behavior!=null)) return;
         this.landscape=landscape;
         GradientDrawable back=new GradientDrawable(); back.setColor(M3.color(context,R.attr.colorSurfaceContainer));
         float r=M3.dp(context,28);
@@ -58,7 +62,6 @@ final class ControlsSheet {
         sheet.setBackground(back);
         handle.setVisibility(landscape?View.GONE:View.VISIBLE);
         sheet.setPadding(0,landscape?M3.dp(context,8):0,0,0);
-        scroll.setPadding(0,0,0,landscape?M3.dp(context,8):bottomInset+M3.dp(context,8));
         CoordinatorLayout.LayoutParams p=new CoordinatorLayout.LayoutParams(-1,-1); p.gravity=Gravity.BOTTOM;
         if(!landscape) {
             behavior=new BottomSheetBehavior<>(); behavior.setHideable(true); behavior.setSkipCollapsed(true); behavior.setFitToContents(true);
