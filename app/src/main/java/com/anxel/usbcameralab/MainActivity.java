@@ -11,7 +11,6 @@ import static com.serenegiant.usb.UVCControl.*;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
-import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -23,6 +22,13 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
+import androidx.activity.EdgeToEdge;
+import androidx.activity.OnBackPressedCallback;
+import androidx.activity.SystemBarStyle;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import android.provider.Settings;
 import android.view.*;
 import android.widget.*;
@@ -34,9 +40,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-// English-only UI built in code (no string resources), with framework widgets on a framework theme (no AppCompat).
+// English-only UI built in code (no string resources), on a Material 3 theme (AppCompatActivity).
 @SuppressLint({"SetTextI18n","UseSwitchCompatOrMaterialCode"})
-public class MainActivity extends Activity {
+public class MainActivity extends AppCompatActivity {
     // The camera, its connection state machine, the stream mode and the capture live in CameraSession, for the whole process.
     // This screen attaches while it is on screen (onStart..onStop): it renders the session, adds its preview surface, and builds
     // the controls panel and the capture bar on the session's camera. A video or time-lapse goes on while the screen is away
@@ -55,6 +61,7 @@ public class MainActivity extends Activity {
     private FrameLayout previewBox;
     private SurfaceView preview;
     private double aspect = 4.0/3.0;
+    private Insets bars=Insets.NONE; // system bars and cutout: the window is drawn edge-to-edge, behind them
     private TextView status, details;
     private Button action; // the one button, shown only when the user has to act
     private CaptureBar captureBar;
@@ -62,6 +69,7 @@ public class MainActivity extends Activity {
     private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
 
     @Override public void onCreate(Bundle saved) {
+        EdgeToEdge.enable(this,SystemBarStyle.dark(0),SystemBarStyle.dark(0)); // transparent bars with light icons
         super.onCreate(saved);
         session=CameraSession.get(this); capture=session.capture;
         root=new LinearLayout(this); root.setBackgroundColor(BACKGROUND);
@@ -85,6 +93,8 @@ public class MainActivity extends Activity {
         panel.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         root.addView(previewBox); root.addView(panel);
         root.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,orr,ob) -> root.post(this::sizePreview));
+        ViewCompat.setOnApplyWindowInsetsListener(root,(v,insets) -> { bars=insets.getInsets(WindowInsetsCompat.Type.systemBars()|WindowInsetsCompat.Type.displayCutout()); arrange(getResources().getConfiguration()); return insets; });
+        getOnBackPressedDispatcher().addCallback(this,back);
         arrange(getResources().getConfiguration());
         setContentView(root);
         addContentView(captureBar.dim,new ViewGroup.LayoutParams(-1,-1)); // over everything while a time-lapse runs dimmed
@@ -110,8 +120,8 @@ public class MainActivity extends Activity {
             panel.setLayoutParams(new LinearLayout.LayoutParams(-1,0,1)); panel.setPaddingRelative(0,0,0,0);
             root.post(this::sizePreview);
         }
-        if(fullScreen) { previewBox.setLayoutParams(new LinearLayout.LayoutParams(-1,-1)); root.setPadding(0,0,0,0); }
-        else root.setPadding(dp(12),dp(12),dp(12),dp(8));
+        if(fullScreen) { previewBox.setLayoutParams(new LinearLayout.LayoutParams(-1,-1)); root.setPadding(bars.left,bars.top,bars.right,bars.bottom); }
+        else root.setPadding(bars.left+dp(12),bars.top+dp(12),bars.right+dp(12),bars.bottom+dp(8));
     }
     // Full screen: only the preview, letterboxed on black, with the system bars hidden (a swipe shows them for a moment).
     // A tap or Back returns. Only views change, so the stream keeps running.
@@ -129,8 +139,14 @@ public class MainActivity extends Activity {
             if(on) bars.hide(WindowInsets.Type.systemBars()); else bars.show(WindowInsets.Type.systemBars());
         } else getWindow().getDecorView().setSystemUiVisibility(on?View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY:0);
     }
-    @SuppressWarnings("deprecation") // still called on every version while the app doesn't opt in to predictive back
-    @Override public void onBackPressed() { if(captureBar.wake()) return; if(fullScreen) setFullScreen(false); else super.onBackPressed(); }
+    // Back wakes a dimmed screen, then leaves full screen, then leaves the app as usual.
+    private final OnBackPressedCallback back=new OnBackPressedCallback(true) {
+        @Override public void handleOnBackPressed() {
+            if(captureBar.wake()) return;
+            if(fullScreen) { setFullScreen(false); return; }
+            setEnabled(false); getOnBackPressedDispatcher().onBackPressed(); setEnabled(true);
+        }
+    };
     // Portrait: the preview gets the full width at the camera's aspect ratio (at most 55% of the height); controls scroll below.
     private void sizePreview() {
         if(landscape || fullScreen) return;

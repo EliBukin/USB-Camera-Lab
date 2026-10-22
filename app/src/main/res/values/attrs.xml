@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Theme attributes for Material styles that have no attribute of their own, so views made in code can use them. -->
+<resources>
+    <attr name="filterChipStyle" format="reference"/>
+    <attr name="dropdownMenuStyle" format="reference"/>
+</resources>

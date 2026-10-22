@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material 3, dark only: a fixed scheme around primary #8ACEF0 (the A20 has no dynamic colour), dark grey surfaces, black
+     around the picture. Colours from the redesign mockups (UsbCameraLab-notes/ui-redesign, variation A). -->
+<resources>
+    <style name="Theme.UsbCameraLab" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#8ACEF0</item>
+        <item name="colorOnPrimary">#003548</item>
+        <item name="colorPrimaryContainer">#004D67</item>
+        <item name="colorOnPrimaryContainer">#C0E8FF</item>
+        <item name="colorPrimaryInverse">#00668A</item>
+        <item name="colorSecondary">#B4CAD6</item>
+        <item name="colorOnSecondary">#1F333D</item>
+        <item name="colorSecondaryContainer">#354A54</item>
+        <item name="colorOnSecondaryContainer">#D0E6F2</item>
+        <item name="colorTertiary">#C6C2EA</item>
+        <item name="colorOnTertiary">#2F2D4D</item>
+        <item name="colorTertiaryContainer">#45436A</item>
+        <item name="colorOnTertiaryContainer">#E3DFFF</item>
+        <item name="colorError">#FFB4AB</item>
+        <item name="colorOnError">#690005</item>
+        <item name="colorErrorContainer">#93000A</item>
+        <item name="colorOnErrorContainer">#FFDAD6</item>
+        <item name="android:colorBackground">#0F1417</item>
+        <item name="colorOnBackground">#DEE3E7</item>
+        <item name="colorSurface">#0F1417</item>
+        <item name="colorOnSurface">#DEE3E7</item>
+        <item name="colorSurfaceVariant">#40484C</item>
+        <item name="colorOnSurfaceVariant">#C0C8CD</item>
+        <item name="colorSurfaceInverse">#DEE3E7</item>
+        <item name="colorOnSurfaceInverse">#2C3134</item>
+        <item name="colorOutline">#8A9297</item>
+        <item name="colorOutlineVariant">#40484C</item>
+        <item name="colorSurfaceDim">#0F1417</item>
+        <item name="colorSurfaceBright">#353A3D</item>
+        <item name="colorSurfaceContainerLowest">#0A0F12</item>
+        <item name="colorSurfaceContainerLow">#171C1F</item>
+        <item name="colorSurfaceContainer">#1B2023</item>
+        <item name="colorSurfaceContainerHigh">#252B2E</item>
+        <item name="colorSurfaceContainerHighest">#303539</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <!-- Styles the code asks for by attribute (views are built in Java, see M3.java). -->
+        <item name="filterChipStyle">@style/Widget.Material3.Chip.Filter</item>
+        <item name="dropdownMenuStyle">@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu</item>
+    </style>
+</resources>
