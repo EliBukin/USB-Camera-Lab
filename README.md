@@ -43,6 +43,13 @@ video or time-lapse. Samsung: set the app's Battery to "Unrestricted" for long s
 Hints (cards on the Video and Time-lapse tabs, and in the mode sheet from the chip on the picture): Video with a stream above 1080p (4K decodes at ~11 fps on the A20) or under 24 fps offers a one-tap switch to
 1080p; Time-lapse offers the largest size within 1080p at the lowest frame rate the camera has (here 1920 × 1080 YUYV
 5 fps: about a quarter less battery current than MJPEG 30 fps). Nothing switches by itself.
+Camera info (Home's camera card, ⋮ > Camera info): a read-only page over the app (the preview keeps running behind it)
+that shows what the plugged-in camera is and offers, decoded from its USB descriptors: name, manufacturer, serial,
+VID:PID and whether the vendor ID is in the public USB ID list, firmware version (bcdDevice), USB version and speed,
+power; the UVC version and its terminals and units; every control the camera declares and whether this app shows it;
+every format with its frame sizes and frame rates, still-image support and the streaming endpoint; USB audio and
+Android's name for that input; and the extension units (vendor controls), read with GET requests only (GET_INFO,
+GET_LEN, GET_CUR, GET_MIN, GET_MAX, GET_DEF; never a SET). Copy as text puts the whole report on the clipboard.
 No internet permission.
 With nothing recording, the camera stops when the app leaves the screen or is unplugged, and reconnects on return or plug-in.
 On plug-in Android offers to open USB Camera Lab for the camera; "always" skips the access prompt next time.

@@ -174,7 +174,7 @@ final class CameraSession implements CaptureController.Listener {
     }
 
     private void say(String value) { statusText=value; if(ui!=null) ui.status(value); android.util.Log.i("UsbCameraLab",value); }
-    private static boolean video(UsbDevice d) { for(int i=0;i<d.getInterfaceCount();i++) if(d.getInterface(i).getInterfaceClass()==UsbConstants.USB_CLASS_VIDEO) return true; return false; }
+    static boolean video(UsbDevice d) { for(int i=0;i<d.getInterfaceCount();i++) if(d.getInterface(i).getInterfaceClass()==UsbConstants.USB_CLASS_VIDEO) return true; return false; }
     private void setState(State next) {
         if(state==State.OPEN && next!=State.OPEN) { capture.onCameraGone("state "+next); dropProbe(); }
         state=next; android.util.Log.i("UsbCameraLab","state "+next);

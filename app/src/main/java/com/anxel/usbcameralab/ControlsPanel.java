@@ -29,10 +29,12 @@ import com.google.android.material.slider.Slider;
 import com.google.android.material.slider.TickVisibilityMode;
 import com.serenegiant.usb.UVCControl;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 // Camera controls: every UVC control UVCAndroid can drive, shown only when the camera reports it, as Material section cards
 // (Image, White balance, Exposure, Focus/zoom/position, Other) that open in place and show a summary when closed. One panel
@@ -53,6 +55,7 @@ final class ControlsPanel {
     private final List<Row> rows=new ArrayList<>();
     private final List<Section> sections=new ArrayList<>();
     private final Map<Row,Integer> pendingWrites=new LinkedHashMap<>(); // slider values waiting to be sent
+    private final Set<Integer> noRange=new HashSet<>(); // reported controls left out because their limits gave no range
     private boolean writeQueued, updating;
 
     ControlsPanel(Context context,CameraSession session,Host host) {
@@ -303,7 +306,7 @@ final class ControlsPanel {
         for(Spec s:SPECS) {
             if(!control.checkSupportFlag(s.flag)) continue;
             Row r=new Row(s);
-            if(!r.build()) { android.util.Log.w("UsbCameraLab","control "+s.label+" reported but has no usable range"); continue; }
+            if(!r.build()) { noRange.add(s.flag); android.util.Log.w("UsbCameraLab","control "+s.label+" reported but has no usable range"); continue; }
             if(section==null || !s.section.equals(section.name)) { section=new Section(s.section); sections.add(section); }
             section.body.addView(r.view,new LinearLayout.LayoutParams(-1,-2)); section.rows.add(r); rows.add(r);
         }
@@ -321,7 +324,30 @@ final class ControlsPanel {
     // The camera left OPEN: no rows, nothing pending.
     void clear() {
         ui.removeCallbacksAndMessages(null); writeQueued=false; pendingWrites.clear();
-        control=null; rows.clear(); sections.clear(); view.removeAllViews();
+        control=null; rows.clear(); sections.clear(); noRange.clear(); view.removeAllViews();
+    }
+
+    // ---- For the Camera info page ----
+    // The name this panel gives a UVC control flag ("Auto exposure", "Pan / Tilt", "Focus (relative)"), or null when it has none.
+    static String label(int flag) {
+        StringBuilder s=new StringBuilder();
+        for(Spec spec:SPECS) if(spec.flag==flag) s.append(s.length()==0?"":" / ").append(spec.label);
+        if(s.length()>0) return s.toString();
+        for(int i=0;i<UNLISTED_FLAGS.length;i++) if(UNLISTED_FLAGS[i]==flag) return Character.toUpperCase(UNLISTED_NAMES[i].charAt(0))+UNLISTED_NAMES[i].substring(1);
+        return null;
+    }
+    // What the panel does with a control the camera declares: a row (SHOWN); reported, but its limits gave no range, so no row
+    // (NO_RANGE); relative, packed or analog, named in the footnote (NOT_ADJUSTABLE); not reported by the library's support
+    // flags (NOT_REPORTED); no settings UI in this app (NOT_IN_APP); or a row once the camera is open and read (WHEN_OPEN).
+    static final int SHOWN=0, NO_RANGE=1, NOT_ADJUSTABLE=2, NOT_REPORTED=3, NOT_IN_APP=4, WHEN_OPEN=5;
+    boolean ready() { return control!=null; } // the rows were built for the open camera
+    int status(int flag) {
+        boolean adjustable=false;
+        for(Spec s:SPECS) if(s.flag==flag) adjustable=true;
+        if(!adjustable) { for(int f:UNLISTED_FLAGS) if(f==flag) return NOT_ADJUSTABLE; return NOT_IN_APP; }
+        if(control==null) return WHEN_OPEN;
+        for(Row r:rows) if(r.spec.flag==flag) return SHOWN;
+        return noRange.contains(flag)?NO_RANGE:NOT_REPORTED;
     }
     // A slider disabled while its auto mode is on: the camera picks that value itself.
     private void updateEnabled() {

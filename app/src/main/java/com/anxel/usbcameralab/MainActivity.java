@@ -73,6 +73,7 @@ public class MainActivity extends AppCompatActivity {
     private Runnable actionTap;
     private AlertDialog restoreDialog;
     private BottomSheetDialog modeSheet;
+    private CameraInfoPage cameraInfo; // the Camera info page, once opened
 
     @Override public void onCreate(Bundle saved) {
         EdgeToEdge.enable(this,SystemBarStyle.dark(0),SystemBarStyle.dark(0)); // transparent bars with light icons; Shell pads for them
@@ -80,9 +81,9 @@ public class MainActivity extends AppCompatActivity {
         session=CameraSession.get(this); capture=session.capture;
         prefs=getSharedPreferences(CaptureController.PREFS,MODE_PRIVATE);
         preview=new PreviewHost(this,previewHost);
-        controls=new ControlsPanel(this,session,() -> { captureBar.captureChanged(); render(); offerRestore(); }); // the lock option needs the controls
+        controls=new ControlsPanel(this,session,() -> { captureBar.captureChanged(); render(); offerRestore(); if(cameraInfo!=null) cameraInfo.controlsChanged(); }); // the lock option needs the controls
         homeMode=new ModePanel(this,session);
-        home=new HomeTab(this,homeMode,() -> controls.resetAll());
+        home=new HomeTab(this,homeMode,() -> controls.resetAll(),this::openCameraInfo);
         home.controlsSlot.addView(controls.view,new FrameLayout.LayoutParams(-1,-2));
         captureBar=new CaptureBar(this,preview,captureHost); captureBar.attach(capture);
         FrameLayout panels=new FrameLayout(this);
@@ -221,6 +222,7 @@ public class MainActivity extends AppCompatActivity {
     // The session's side of this screen.
     private final CameraSession.Ui screen=new CameraSession.Ui() {
         public void stateChanged(State next) {
+            if(cameraInfo!=null) cameraInfo.sessionChanged();
             if(next==State.OPEN) { getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); render(); return; }
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             controls.clear(); homeMode.update();
@@ -310,6 +312,11 @@ public class MainActivity extends AppCompatActivity {
         if(action!=null) s.setAction(action,v -> onTap.run());
         s.show();
     }
+    // Home's camera card, ⋯ > Camera info: what the camera is and offers, over this screen (the preview keeps running behind it).
+    private void openCameraInfo() {
+        if(cameraInfo==null) cameraInfo=new CameraInfoPage(this,session,controls);
+        cameraInfo.show();
+    }
     // After a time-lapse, or at the next open of that camera when the run ended with it: offer to turn the auto modes back on.
     private void offerRestore() {
         String names=controls.lockedNames();
@@ -328,11 +335,11 @@ public class MainActivity extends AppCompatActivity {
         session.attach(screen,captureBar);
     }
     // A run going on in the background comes back undimmed.
-    @Override protected void onStop() { captureBar.wake(); session.detach(screen); super.onStop(); }
+    @Override protected void onStop() { captureBar.wake(); if(cameraInfo!=null) cameraInfo.stop(); session.detach(screen); super.onStop(); }
     // A run going on in the background keeps the session OPEN, so nothing cleared this screen's pending updates (the controls'
     // build and refresh).
     @Override protected void onDestroy() {
-        controls.clear(); if(modeSheet!=null) modeSheet.dismiss(); if(restoreDialog!=null) restoreDialog.dismiss();
+        controls.clear(); if(modeSheet!=null) modeSheet.dismiss(); if(restoreDialog!=null) restoreDialog.dismiss(); if(cameraInfo!=null) cameraInfo.release();
         session.forget(captureBar); captureBar.release(); super.onDestroy();
     }
 }

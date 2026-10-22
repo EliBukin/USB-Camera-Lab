@@ -44,4 +44,12 @@
         <item name="filterChipStyle">@style/Widget.Material3.Chip.Filter</item>
         <item name="dropdownMenuStyle">@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu</item>
     </style>
+    <!-- The Camera info page: a full-screen dialog window over the main screen (not an activity), so the activity stays started
+         and the preview keeps running behind it. -->
+    <style name="Theme.UsbCameraLab.FullScreenDialog">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:statusBarColor">#0F1417</item>
+        <item name="android:navigationBarColor">#0F1417</item>
+        <item name="android:windowAnimationStyle">@style/Animation.AppCompat.Dialog</item>
+    </style>
 </resources>

@@ -9,9 +9,11 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import androidx.appcompat.widget.PopupMenu;
 import com.google.android.material.button.MaterialButton;
 
-// The Home tab, under the picture: the camera card (name, status, and the one button when the user has to act), a banner while
+// The Home tab, under the picture: the camera card (name, status, the one button when the user has to act, and its ⋯ menu with
+// Camera info), a banner while
 // a video or time-lapse runs, the camera mode (ModePanel), then the controls (ControlsPanel, whose view moves to the controls
 // sheet while that is open) under a "Controls · Reset all" header. With no camera, a tip about Android's plug-in dialog.
 @SuppressLint("SetTextI18n") // English-only UI built in code
@@ -26,7 +28,7 @@ final class HomeTab {
     private final MaterialButton action;
     private final View modeCard, controlsHeader;
 
-    HomeTab(Context c,ModePanel mode,Runnable resetAll) {
+    HomeTab(Context c,ModePanel mode,Runnable resetAll,Runnable cameraInfo) {
         context=c;
         LinearLayout list=M3.column(c); list.setPadding(0,M3.dp(c,10),0,M3.dp(c,12));
         // The camera card.
@@ -38,6 +40,13 @@ final class HomeTab {
         name=M3.title(c,"No camera"); status=M3.small(c,CameraSession.NO_CAMERA); status.setCompoundDrawablePadding(M3.dp(c,6));
         words.addView(name); words.addView(status);
         top.addView(words,M3.margins(c,0,-2,12,0,0,0)); ((LinearLayout.LayoutParams)words.getLayoutParams()).weight=1;
+        MaterialButton more=M3.iconButton(c,R.drawable.ic_more_vert,"More options");
+        more.setOnClickListener(v -> {
+            PopupMenu menu=new PopupMenu(c,v);
+            menu.getMenu().add("Camera info").setOnMenuItemClickListener(item -> { cameraInfo.run(); return true; });
+            menu.show();
+        });
+        top.addView(more);
         card.addView(top);
         action=M3.filledButton(c,"",R.drawable.ic_refresh); action.setVisibility(View.GONE);
         LinearLayout.LayoutParams a=M3.margins(c,-2,-2,0,8,0,0); a.gravity=android.view.Gravity.END; card.addView(action,a);
