@@ -13,9 +13,10 @@ import com.herohan.uvcapp.CameraHelper;
 import com.serenegiant.usb.Size;
 
 // Capture on top of the camera session: the mode, the shutter, the shot or recording in flight and the last saved file. It holds
-// no Activity, only a Listener, so it can later live in a foreground service. Main thread only; MediaStore work for photos runs
-// on its own "capture-io" thread, a recording or time-lapse on its own thread. Valid while the camera is OPEN: MainActivity calls
-// onCameraOpen, and onCameraGone first on every way out of OPEN. The mode and the time-lapse interval survive restarts.
+// no Activity, only a Listener (CameraSession, which passes it on to the screen's bar), and lives as long as the process. Main
+// thread only; MediaStore work for photos runs on its own "capture-io" thread, a recording or time-lapse on its own thread. Valid
+// while the camera is OPEN: CameraSession calls onCameraOpen, and onCameraGone first on every way out of OPEN. The mode and the
+// time-lapse interval survive restarts.
 final class CaptureController {
     enum Mode { PHOTO, VIDEO, TIMELAPSE }
     static final String APP_STOPPED="app stopped"; // onCameraGone reason when the app leaves the screen
@@ -47,7 +48,6 @@ final class CaptureController {
     private VideoRecorder video; // the recording, until its file is finished
     private TimelapseRecorder timelapse; // the time-lapse, until its last part is finished
     private boolean stopping;    // the recording or time-lapse was asked to stop
-    private boolean released;
 
     CaptureController(Context context,Listener listener) {
         this.context=context.getApplicationContext(); files=new MediaFiles(this.context); this.listener=listener;
@@ -61,14 +61,13 @@ final class CaptureController {
             files.deleteLeftovers();
             Uri newest=files.newest(); if(newest==null) return;
             Bitmap thumb=files.thumbnail(newest);
-            main.post(() -> { if(!released) listener.lastSaved(newest,MediaFiles.isVideo(newest),thumb); });
+            main.post(() -> listener.lastSaved(newest,MediaFiles.isVideo(newest),thumb));
         });
     }
     Mode mode() { return mode; }
     int interval() { return interval; }
     // In VIDEO and TIMELAPSE mode the shutter starts a run and stops it again; it is off while the file is being finished.
     boolean canShoot() {
-        if(released) return false;
         if(video!=null || timelapse!=null) return !stopping;
         return helper!=null && shot==null;
     }
@@ -85,11 +84,11 @@ final class CaptureController {
         return v[0]+" × "+v[1]+(v[1]==stream.height?"":"\nfrom "+stream.height+"p");
     }
     void setMode(Mode m) {
-        if(m==mode || isBusy() || released) return;
+        if(m==mode || isBusy()) return;
         mode=m; prefs.edit().putString("mode",m.name()).apply(); listener.captureChanged();
     }
     void setInterval(int seconds) {
-        if(seconds==interval || timelapse!=null || released) return;
+        if(seconds==interval || timelapse!=null) return;
         interval=seconds; prefs.edit().putInt("interval",seconds).apply(); listener.captureChanged();
     }
 
@@ -131,41 +130,32 @@ final class CaptureController {
     private void shotDone(PhotoCapture s,Uri saved,Bitmap thumb,String error) {
         if(s!=shot) return;
         shot=null;
-        if(released) { ioThread.quitSafely(); return; }
         if(saved!=null) listener.lastSaved(saved,false,thumb);
         else if(s.owner==helper) listener.captureFailed("Couldn't save the photo ("+error+")"); // a shot from an ended session fails quietly
         listener.captureChanged();
     }
     private final VideoRecorder.Events recorderEvents=new VideoRecorder.Events() {
-        public void progress(VideoRecorder r,long ms,long bytes) { if(r==video && !released) listener.recordingProgress(ms,bytes); }
-        public void sound(VideoRecorder r,String source) { if(r==video && !released) listener.soundSource(source); }
+        public void progress(VideoRecorder r,long ms,long bytes) { if(r==video) listener.recordingProgress(ms,bytes); }
+        public void sound(VideoRecorder r,String source) { if(r==video) listener.soundSource(source); }
         public void finished(VideoRecorder r,Uri saved,Bitmap thumb,String why) {
             if(r!=video) return;
             video=null; stopping=false;
-            if(released) return;
             if(saved!=null) listener.lastSaved(saved,true,thumb);
             listener.recordingEnded(saved==null ? "Video not saved: "+why : why==null ? null : "Recording stopped: "+why+". The video is saved.");
             listener.captureChanged();
         }
     };
     private final TimelapseRecorder.Events timelapseEvents=new TimelapseRecorder.Events() {
-        public void progress(TimelapseRecorder r,int frames,long ms) { if(r==timelapse && !released) listener.timelapseProgress(frames,ms); }
-        public void warning(TimelapseRecorder r,String message) { if(r==timelapse && !released) listener.captureWarning(message); }
-        public void partSaved(TimelapseRecorder r,Uri saved,Bitmap thumb) { if(r==timelapse && !released) listener.lastSaved(saved,true,thumb); }
+        public void progress(TimelapseRecorder r,int frames,long ms) { if(r==timelapse) listener.timelapseProgress(frames,ms); }
+        public void warning(TimelapseRecorder r,String message) { if(r==timelapse) listener.captureWarning(message); }
+        public void partSaved(TimelapseRecorder r,Uri saved,Bitmap thumb) { if(r==timelapse) listener.lastSaved(saved,true,thumb); }
         public void finished(TimelapseRecorder r,Uri saved,Bitmap thumb,int parts,String why) {
             if(r!=timelapse) return;
             timelapse=null; stopping=false;
-            if(released) return;
             if(saved!=null) listener.lastSaved(saved,true,thumb);
             String what=parts>1?"The "+parts+" parts are saved.":"The video is saved.";
             listener.recordingEnded(saved==null ? "Time-lapse not saved: "+why : why==null ? null : "Time-lapse stopped: "+why+". "+what);
             listener.captureChanged();
         }
     };
-    // The owner is going away. A shot in flight still finishes its file, and so does a recording; the io thread ends after the shot.
-    void release() {
-        stopRun("the app closed");
-        released=true; helper=null;
-        if(shot==null) ioThread.quitSafely();
-    }
 }
