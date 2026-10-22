@@ -10,10 +10,13 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
+import android.media.Image;
+import android.media.ImageReader;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -61,7 +64,19 @@ public class MainActivity extends Activity {
     private final List<Size> modes = new ArrayList<>();
     private Size mode;
     private Spinner sizePicker, ratePicker; // off while a capture is busy: a new stream size would change the aspect under a running encoder
-    private SharedPreferences savedModes; // the user's pick per camera
+    private SharedPreferences savedModes; // the user's pick per camera, saved once it streamed
+    // A camera can offer a mode it can't stream (USB 2.0 bandwidth, quirks), so a mode is on trial until its first frame:
+    // `probe` is a tiny extra render target, drawn only when a camera frame came in (not the library frame callback: native
+    // crash reports, capture-design.md §1.4; not a SurfaceTexture: nothing would consume it, and a full queue could stall the
+    // renderer). `trying` is the mode on trial, `pick` when the user chose it, `wayBack` when a failure may fall back once:
+    // a saved mode or a pick, to what pickMode then gives (the default, or the last pick that streamed). `fellBack` is the mode
+    // that failed while that one fallback runs; after it the user decides as before.
+    private static final int FIRST_FRAME_MS=5000;
+    private ImageReader probe;
+    private long probeStart;
+    private Size trying, fellBack;
+    private boolean pick, wayBack;
+    private final android.os.Handler later=new android.os.Handler(android.os.Looper.getMainLooper()); // not cleared by setState
     private boolean landscape, fullScreen;
     private LinearLayout root, header, panel, controls;
     private FrameLayout previewBox;
@@ -166,7 +181,7 @@ public class MainActivity extends Activity {
     private void say(String value) { status.setText(value); android.util.Log.i("UsbCameraLab",value); }
     private boolean video(UsbDevice d) { for(int i=0;i<d.getInterfaceCount();i++) if(d.getInterface(i).getInterfaceClass()==UsbConstants.USB_CLASS_VIDEO) return true; return false; }
     private void setState(State next) {
-        if(state==State.OPEN && next!=State.OPEN) capture.onCameraGone("state "+next);
+        if(state==State.OPEN && next!=State.OPEN) { capture.onCameraGone("state "+next); dropProbe(); }
         state=next; android.util.Log.i("UsbCameraLab","state "+next);
         if(next==State.OPEN) { getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); return; }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -185,6 +200,7 @@ public class MainActivity extends Activity {
         if(d==null) { hideAction(); say(NO_CAMERA); return; }
         if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED) { askingPermission=true; requestPermissions(new String[]{Manifest.permission.CAMERA},1); return; }
         waitForUser=false; hideAction();
+        trying=savedMode(d); pick=false; wayBack=fellBack==null && trying!=null; // a saved mode is on trial from the open on
         if(deviceOpen && selected!=null) { setState(State.CONNECTING); say("Opening camera…"); helper.openCamera(openParam(selected)); return; }
         selected=d; setState(State.CONNECTING);
         say(usb.hasPermission(d)?"Connecting…":"Allow USB access to the camera…");
@@ -240,10 +256,11 @@ public class MainActivity extends Activity {
             owner.startPreview();
             if(preview.getHolder().getSurface().isValid()) owner.addSurface(preview.getHolder().getSurface(),false);
             showMode(); capture.onCameraOpen(owner,mode,d.getProductName());
+            if(mode!=null) watch(false);
             StringBuilder all=new StringBuilder();
             for(Size m:modes) all.append(all.length()==0?"":"; ").append(m.width).append('x').append(m.height).append(' ').append(format(m)).append(' ').append(m.fpsList);
             android.util.Log.i("UsbCameraLab","modes: "+all+" | opened at "+(opened==null?"?":modeName(opened))+", streaming "+(mode==null?"?":modeName(mode)));
-            say("Camera open • preview running");
+            say(fellBack==null || mode==null?"Camera open • preview running":didntStream(fellBack,mode));
             ui.postDelayed(MainActivity.this::showControls,700); // UVCControl: support flags can be wrong right after open
         }
         public void onCameraClose(UsbDevice d) {
@@ -254,19 +271,19 @@ public class MainActivity extends Activity {
         public void onDeviceClose(UsbDevice d) {
             if(stale()) return;
             deviceOpen=false;
-            if(state==State.CLOSING) { setState(State.IDLE); needUser(closingMessage); }
-            else if(state!=State.IDLE) { setState(State.IDLE); needUser("Lost the camera connection."); }
+            if(state==State.CLOSING) { setState(State.IDLE); lost(closingMessage); }
+            else if(state!=State.IDLE) { setState(State.IDLE); lost("Lost the camera connection."); }
         }
         public void onDetach(UsbDevice d) {
             if(stale()) return;
             boolean ours=selected!=null && selected.equals(d);
-            if(ours) { deviceOpen=false; selected=null; if(state!=State.IDLE) setState(State.IDLE); }
+            if(ours) { deviceOpen=false; selected=null; fellBack=null; if(state!=State.IDLE) setState(State.IDLE); }
             if(ours || (state==State.IDLE && video(d))) { waitForUser=false; hideAction(); say("Camera unplugged. Plug it back in to continue."); }
         }
         public void onCancel(UsbDevice d) { if(!stale() && state==State.CONNECTING) { setState(State.IDLE); needUser("USB access to the camera was not allowed."); } }
         public void onError(UsbDevice d,CameraException e) {
             android.util.Log.e("UsbCameraLab","Camera error",e);
-            if(!stale() && state!=State.IDLE) { deviceOpen=false; setState(State.IDLE); needUser("Couldn't open the camera. Try again, or unplug it and plug it back in."); }
+            if(!stale() && state!=State.IDLE) { deviceOpen=false; setState(State.IDLE); lost("Couldn't open the camera. Try again, or unplug it and plug it back in."); }
         }
     }
     private void fitPreview() {
@@ -327,22 +344,70 @@ public class MainActivity extends Activity {
     }
     // Switch in place: stop, renegotiate, start (queued in order on the helper's thread). The camera, USB device, surfaces and
     // controls stay open, so there is no close/reopen round trip. If the camera refuses, UVCAndroid closes it and
-    // onDeviceClose reports the lost connection.
-    private void applyMode(Size m) {
+    // onDeviceClose reports the lost connection. `pick`: the user's choice, saved once it streams.
+    private void applyMode(Size m,boolean pick) {
         if(state!=State.OPEN || mode==null || same(m,mode) || capture.isBusy()) return;
         android.util.Log.i("UsbCameraLab","mode "+modeName(mode)+" -> "+modeName(m)+" at "+SystemClock.uptimeMillis());
         helper.stopPreview(); helper.setPreviewSize(m); helper.startPreview();
         mode=m; showMode(); capture.onModeChanged(m); scheduleRefresh(); // some cameras reset controls with the stream
-        savedModes.edit().putString(cameraKey(selected),m.type+","+m.width+","+m.height+","+m.fps).apply();
+        if(pick) fellBack=null; // the user's new attempt
+        watch(pick);
     }
     // A switch from outside the picker (the capture hints): the picker shows the new mode too. Its listeners fire for the new
     // selection and find the mode already applied.
     private void switchMode(Size m) {
-        applyMode(m);
+        applyMode(m,true);
         if(sizePicker==null || ratePicker==null || !same(m,mode)) return;
         for(int i=0;i<modes.size();i++) { Size o=modes.get(i); if(o.type==m.type && o.width==m.width && o.height==m.height) sizePicker.setSelection(i,false); }
         showRates(ratePicker);
     }
+    // Put `mode` on trial: the probe is queued on the helper's thread after the stream start, so only frames of this mode reach it.
+    private void watch(boolean pick) {
+        dropProbe();
+        trying=mode; this.pick=pick; wayBack=fellBack==null && (pick || same(mode,savedMode(selected)));
+        ImageReader r=ImageReader.newInstance(16,16,PixelFormat.RGBA_8888,2); probe=r; probeStart=SystemClock.uptimeMillis();
+        r.setOnImageAvailableListener(p -> { Image f=p.acquireLatestImage(); if(f!=null) f.close(); if(p==probe) streams(); },ui);
+        helper.addSurface(r.getSurface(),false);
+        ui.postDelayed(noFrames,FIRST_FRAME_MS);
+    }
+    // The renderer lets go of a removed target on its own thread a moment later: close the reader only after that.
+    private void dropProbe() {
+        ui.removeCallbacks(noFrames); if(probe==null) return;
+        ImageReader r=probe; probe=null;
+        if(helper!=null) helper.removeSurface(r.getSurface());
+        later.postDelayed(r::close,2000);
+    }
+    private void streams() {
+        if(state!=State.OPEN || trying==null) return;
+        android.util.Log.i("UsbCameraLab","streams: "+modeName(trying)+", first frame after "+(SystemClock.uptimeMillis()-probeStart)+" ms"+(pick?", remembered":""));
+        if(pick) savedModes.edit().putString(cameraKey(selected),trying.type+","+trying.width+","+trying.height+","+trying.fps).apply();
+        trying=null; fellBack=null; dropProbe();
+    }
+    // No frame in time while the camera stays open: back in place to what pickMode now gives, or, while a capture holds the
+    // mode, by reconnecting (lost() after the close). With no way back the camera closes and the user decides.
+    private final Runnable noFrames=() -> {
+        if(state!=State.OPEN || trying==null) return;
+        android.util.Log.w("UsbCameraLab","no frame in "+modeName(trying)+" after "+FIRST_FRAME_MS+" ms");
+        Size failed=trying, to=failedTrial(failed)?pickMode(selected):null;
+        if(to!=null && same(to,failed)) to=null;
+        if(to!=null && !capture.isBusy()) { fellBack=failed; say(didntStream(failed,to)); applyMode(to,false); switchMode(to); return; } // switchMode then only moves the picker
+        if(to==null) trying=null;
+        dropProbe(); helper.closeCamera(); closing("No picture from the camera. Try again, or unplug it and plug it back in.");
+    };
+    // The mode on trial failed: a saved one is forgotten. True when this attempt may still fall back.
+    private boolean failedTrial(Size m) {
+        if(selected!=null && same(savedMode(selected),m)) savedModes.edit().remove(cameraKey(selected)).apply();
+        return wayBack && fellBack==null;
+    }
+    // Where a failed attempt would ask the user: if it failed in a mode on trial with a way back, reconnect once instead
+    // (pickMode then gives the default or the last pick that streamed), after a moment, like a Try again.
+    private void lost(String message) {
+        Size failed=trying; trying=null;
+        if(failed==null || !failedTrial(failed)) { fellBack=null; needUser(message); return; }
+        fellBack=failed; say(modeName(failed)+" didn't stream on this camera. Reconnecting…");
+        ui.postDelayed(() -> { if(fellBack==failed) connect(); },500);
+    }
+    private static String didntStream(Size failed,Size to) { return modeName(failed)+" didn't stream on this camera; back to "+shortName(to); }
     private interface Picked { void at(int position); }
     private Spinner spinner(Picked picked) {
         Spinner s=new Spinner(this);
@@ -360,8 +425,8 @@ public class MainActivity extends Activity {
     // "Camera mode" heads the panel: format and frame size, then a frame-rate list when that size offers more than one.
     private void addModePicker() {
         if(mode==null || modes.isEmpty()) return;
-        Spinner rates=spinner(i -> { Size res=find(mode.type,mode.width,mode.height); if(res!=null) applyMode(at(res,res.fpsList.get(i))); });
-        Spinner sizes=spinner(i -> { Size res=modes.get(i); applyMode(at(res,rate(res,mode.fps))); showRates(rates); });
+        Spinner rates=spinner(i -> { Size res=find(mode.type,mode.width,mode.height); if(res!=null) applyMode(at(res,res.fpsList.get(i)),true); });
+        Spinner sizes=spinner(i -> { Size res=modes.get(i); applyMode(at(res,rate(res,mode.fps)),true); showRates(rates); });
         List<String> labels=new ArrayList<>(); int current=0;
         for(Size m:modes) {
             if(m.type==mode.type && m.width==mode.width && m.height==mode.height) current=labels.size();
@@ -634,7 +699,7 @@ public class MainActivity extends Activity {
     };
     private void closing(String message) {
         setState(State.CLOSING); closingMessage=message; say("Closing…");
-        ui.postDelayed(() -> { if(state==State.CLOSING) { setState(State.IDLE); needUser(closingMessage); } },3000); // fallback if onDeviceClose never comes
+        ui.postDelayed(() -> { if(state==State.CLOSING) { setState(State.IDLE); lost(closingMessage); } },3000); // fallback if onDeviceClose never comes
     }
     @Override protected void onStart() {
         super.onStart();
@@ -643,7 +708,7 @@ public class MainActivity extends Activity {
         // app holds RECORD_AUDIO (video with the camera's mic records through its own path).
         helper.setImageCaptureConfig(helper.getImageCaptureConfig().setJpegCompressionQuality(95));
         helper.setVideoCaptureConfig(helper.getVideoCaptureConfig().setAudioCaptureEnable(false));
-        waitForUser=false; hideAction();
+        waitForUser=false; fellBack=null; hideAction();
         connect(); // a camera that is already plugged in; later ones arrive through onAttach
     }
     @Override protected void onStop() {
