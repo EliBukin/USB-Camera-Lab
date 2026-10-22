@@ -110,7 +110,6 @@ final class M3 {
         GradientDrawable d=new GradientDrawable(); d.setCornerRadius(dp(c,14)); d.setColor(backing); t.setBackground(d);
         return t;
     }
-    static void pillBacking(TextView pill,int backing) { ((GradientDrawable)pill.getBackground()).setColor(backing); }
 
     // A tinted message with an icon and, optionally, one action under the text: hints (tonal), warnings, info and errors.
     static final class Banner {
@@ -122,7 +121,7 @@ final class M3 {
             view.addView(icon);
             LinearLayout words=column(c); view.addView(words,margins(c,0,-2,10,0,0,0)); ((LinearLayout.LayoutParams)words.getLayoutParams()).weight=1;
             text=body(c,""); words.addView(text);
-            action=textButton(c,"",0); action.setMinHeight(dp(c,40)); action.setMinimumHeight(dp(c,40)); action.setPadding(0,0,dp(c,8),0);
+            action=textButton(c,"",0); action.setMinHeight(dp(c,48)); action.setMinimumHeight(dp(c,48)); action.setPadding(0,0,dp(c,8),0);
             action.setInsetTop(0); action.setInsetBottom(0);
             words.addView(action,new LinearLayout.LayoutParams(-2,-2));
             view.setVisibility(View.GONE);

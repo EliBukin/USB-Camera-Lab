@@ -200,8 +200,8 @@ public class MainActivity extends AppCompatActivity {
         boolean statusOnPicture=tab>HOME || fullScreen;
         preview.setPlaceholder(!open,statusOnPicture?statusText:null,statusOnPicture?actionLabel:null,actionTap);
         boolean busy=capture.isBusy();
-        if(open && mode!=null) preview.setChip(ModePanel.chip(mode),tab==HOME && !capture.recording()?M3.OK:0,busy && capture.recording(),tab>HOME && !busy);
-        else preview.setChip(null,0,false,false);
+        if(open && mode!=null) preview.setChip(ModePanel.chip(mode),tab==HOME && !capture.recording()?M3.OK:0,busy && capture.recording(),tab>HOME && !busy,tab>HOME);
+        else preview.setChip(null,0,false,false,false);
         preview.full.setVisibility(open?View.VISIBLE:View.GONE);
         // With no camera the capture tabs look off (they still open and show the status on the picture).
         for(NavigationBarView bar:new NavigationBarView[]{nav,rail}) for(int i=1;i<tabIds.length;i++) { View item=bar.findViewById(tabIds[i]); if(item!=null) item.setAlpha(open?1f:0.38f); }

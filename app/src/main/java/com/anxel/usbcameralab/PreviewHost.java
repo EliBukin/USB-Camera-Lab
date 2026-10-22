@@ -3,6 +3,7 @@ package com.anxel.usbcameralab;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.InsetDrawable;
 import android.view.Gravity;
 import android.view.SurfaceView;
 import android.view.View;
@@ -41,7 +42,10 @@ final class PreviewHost {
         surface=new SurfaceView(context); box.addView(surface);
         flash=new View(context); flash.setBackgroundColor(0xffffffff); flash.setAlpha(0f); flash.setVisibility(View.INVISIBLE); box.addView(flash);
         hud=new FrameLayout(context); box.addView(hud);
-        chip=M3.pill(context,M3.PILL); chip.setOnClickListener(v -> host.chipTapped()); chip.setMinHeight(M3.dp(context,32));
+        chip=M3.pill(context,M3.PILL); chip.setOnClickListener(v -> host.chipTapped());
+        // A 32 dp pill in a 48 dp touch target: the backing is inset 8 dp above and below.
+        chip.setBackground(new InsetDrawable(chip.getBackground(),0,M3.dp(context,8),0,M3.dp(context,8))); chip.setMinHeight(M3.dp(context,48));
+        chip.setPadding(M3.dp(context,12),M3.dp(context,12),M3.dp(context,12),M3.dp(context,12));
         hud.addView(chip,new FrameLayout.LayoutParams(-2,-2));
         info=M3.column(context); info.setGravity(Gravity.CENTER_HORIZONTAL);
         hint=M3.pill(context,M3.PILL); hint.setGravity(Gravity.CENTER); hint.setMaxWidth(M3.dp(context,300)); hint.setVisibility(View.GONE);
@@ -51,9 +55,9 @@ final class PreviewHost {
         info.addView(hint,new LinearLayout.LayoutParams(-2,-2)); info.addView(run,M3.margins(context,-2,-2,0,6,0,0)); info.addView(sound,M3.margins(context,-2,-2,0,6,0,0));
         hud.addView(info,new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL));
         full=new MaterialButton(context,null,R.attr.materialIconButtonStyle); full.setIconResource(R.drawable.ic_fullscreen); full.setIconTint(M3.tint(0xffffffff));
-        full.setBackgroundTintList(M3.tint(0x73000000)); full.setInsetTop(0); full.setInsetBottom(0); full.setPadding(M3.dp(context,8),M3.dp(context,8),M3.dp(context,8),M3.dp(context,8));
+        full.setBackgroundTintList(M3.tint(0x73000000)); full.setInsetTop(0); full.setInsetBottom(0); full.setPadding(M3.dp(context,12),M3.dp(context,12),M3.dp(context,12),M3.dp(context,12));
         full.setOnClickListener(v -> host.previewTapped());
-        hud.addView(full,new FrameLayout.LayoutParams(M3.dp(context,40),M3.dp(context,40)));
+        hud.addView(full,new FrameLayout.LayoutParams(M3.dp(context,48),M3.dp(context,48)));
         placeholder=M3.column(context); placeholder.setGravity(Gravity.CENTER); placeholder.setBackgroundColor(M3.color(context,R.attr.colorSurfaceContainer));
         placeholder.setPadding(M3.dp(context,24),M3.dp(context,8),M3.dp(context,24),M3.dp(context,8));
         placeholder.addView(M3.image(context,R.drawable.ic_usb,M3.color(context,R.attr.colorOnSurfaceVariant),40));
@@ -81,9 +85,9 @@ final class PreviewHost {
     void setRunning(boolean on) {
         running=on;
         int edge=M3.dp(context,8);
-        FrameLayout.LayoutParams c=new FrameLayout.LayoutParams(-2,-2,(on?Gravity.BOTTOM:Gravity.TOP)|Gravity.START); c.setMargins(edge+M3.dp(context,2),edge,edge,edge);
+        FrameLayout.LayoutParams c=new FrameLayout.LayoutParams(-2,-2,(on?Gravity.BOTTOM:Gravity.TOP)|Gravity.START); c.setMargins(edge+M3.dp(context,2),0,edge,0);
         chip.setLayoutParams(c);
-        FrameLayout.LayoutParams f=new FrameLayout.LayoutParams(M3.dp(context,40),M3.dp(context,40),(on?Gravity.BOTTOM:Gravity.TOP)|Gravity.END); f.setMargins(edge,M3.dp(context,4),M3.dp(context,4),M3.dp(context,4));
+        FrameLayout.LayoutParams f=new FrameLayout.LayoutParams(M3.dp(context,48),M3.dp(context,48),(on?Gravity.BOTTOM:Gravity.TOP)|Gravity.END); f.setMargins(edge,0,0,0);
         full.setLayoutParams(f);
         FrameLayout.LayoutParams i=(FrameLayout.LayoutParams)info.getLayoutParams(); i.topMargin=on || chip.getVisibility()!=View.VISIBLE?edge:M3.dp(context,50); info.setLayoutParams(i);
     }
@@ -91,15 +95,16 @@ final class PreviewHost {
         full.setIconResource(on?R.drawable.ic_fullscreen_exit:R.drawable.ic_fullscreen);
         full.setContentDescription(on?"Leave full screen":"Full screen");
     }
-    // The camera-mode chip: a status dot (Home) or a lock (during a run), and ▾ when it opens the mode sheet.
-    void setChip(String text,int dotColor,boolean locked,boolean opens) {
+    // The camera-mode chip: a status dot (Home) or a lock (during a run), and ▾ when it opens the mode sheet. On the capture tabs
+    // it takes taps (the mode sheet, or why it is locked); on Home a tap goes through to the picture (full screen).
+    void setChip(String text,int dotColor,boolean locked,boolean opens,boolean tappable) {
         if(text==null) { chip.setVisibility(View.GONE); setRunning(running); return; }
         chip.setText(text); chip.setVisibility(View.VISIBLE);
         android.graphics.drawable.Drawable start=null;
         if(locked) start=small(R.drawable.ic_lock);
         else if(dotColor!=0) { GradientDrawable dot=new GradientDrawable(); dot.setShape(GradientDrawable.OVAL); dot.setColor(dotColor); dot.setBounds(0,0,M3.dp(context,8),M3.dp(context,8)); start=dot; }
         chip.setCompoundDrawablesRelative(start,null,opens?small(R.drawable.ic_expand_more):null,null);
-        chip.setClickable(opens);
+        chip.setClickable(tappable);
         chip.setContentDescription("Camera mode "+text+(locked?", locked during the run":"")+(opens?". Tap to change.":""));
         setRunning(running);
     }
@@ -139,8 +144,9 @@ final class PreviewHost {
             if(v.getVisibility()!=GONE) v.measure(MeasureSpec.makeMeasureSpec(Math.max(0,w),MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec(Math.max(0,h),MeasureSpec.EXACTLY));
         }
         @Override protected void onLayout(boolean changed,int l,int t,int r,int b) {
-            for(View v:new View[]{picture,flash,hud}) if(v.getVisibility()!=GONE) v.layout(left,top,left+v.getMeasuredWidth(),top+v.getMeasuredHeight());
-            if(placeholder.getVisibility()!=GONE) placeholder.layout(0,0,placeholder.getMeasuredWidth(),placeholder.getMeasuredHeight());
+            at(picture,left,top); at(flash,left,top); at(hud,left,top); at(placeholder,0,0);
+        }
+        private static void at(View v,int x,int y) { if(v.getVisibility()!=GONE) v.layout(x,y,x+v.getMeasuredWidth(),y+v.getMeasuredHeight());
         }
     }
 }

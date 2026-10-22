@@ -133,7 +133,7 @@ final class CaptureTabs {
     void sound(String title,String note) { soundTitle.setText(title); soundNote.setText(note); soundNote.setVisibility(note==null?View.GONE:View.VISIBLE); }
     // sizeLabel: the controller's ("1920 × 1080", or "1920 × 1080\nfrom 2160p").
     void output(String sizeLabel) {
-        String[] lines=sizeLabel==null?new String[]{"—"}:sizeLabel.split("\n");
+        String[] lines=sizeLabel==null?new String[]{"Up to "+VideoRecorder.MAX_WIDTH+" × "+VideoRecorder.MAX_HEIGHT}:sizeLabel.split("\n");
         output.setText(lines[0]+" · H.264 MP4");
         outputNote.setText((lines.length>1?lines[1]+" · ":"")+MediaFiles.VIDEO_DIR);
     }
