@@ -39,7 +39,8 @@ import java.util.Map;
 public class MainActivity extends Activity {
     // The camera, its connection state machine, the stream mode and the capture live in CameraSession, for the whole process.
     // This screen attaches while it is on screen (onStart..onStop): it renders the session, adds its preview surface, and builds
-    // the controls panel and the capture bar on the session's camera.
+    // the controls panel and the capture bar on the session's camera. A video or time-lapse goes on while the screen is away
+    // (CaptureService); coming back shows it as it is, with no reconnect.
     private static final String IDLE_DETAILS = "Local preview";
     private static final int TEXT = 0xffe8eff5, MUTED = 0xff9aa8b4, ACCENT = 0xff7fc4e0, BACKGROUND = 0xff101820;
     private CameraSession session;
@@ -164,6 +165,7 @@ public class MainActivity extends Activity {
     @Override public void onRequestPermissionsResult(int request,String[] permissions,int[] results) {
         super.onRequestPermissionsResult(request,permissions,results);
         if(request==CaptureBar.MIC_REQUEST) { captureBar.micAnswered(results); return; }
+        if(request==CaptureBar.NOTIFY_REQUEST) { captureBar.notifyAnswered(results); return; }
         if(request!=1) return;
         boolean granted=results.length>0 && results[0]==PackageManager.PERMISSION_GRANTED;
         session.permissionAnswered(granted);
@@ -496,6 +498,8 @@ public class MainActivity extends Activity {
         pendingWrites.clear();
     };
     @Override protected void onStart() { super.onStart(); session.attach(screen,captureBar); }
-    @Override protected void onStop() { session.detach(screen); super.onStop(); }
-    @Override protected void onDestroy() { session.forget(captureBar); captureBar.release(); super.onDestroy(); }
+    // A run going on in the background comes back undimmed.
+    @Override protected void onStop() { captureBar.wake(); session.detach(screen); super.onStop(); }
+    // A run going on in the background keeps the session OPEN, so nothing cleared this screen's pending updates (showControls, refresh).
+    @Override protected void onDestroy() { ui.removeCallbacksAndMessages(null); session.forget(captureBar); captureBar.release(); super.onDestroy(); }
 }

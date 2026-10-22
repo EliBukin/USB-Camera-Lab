@@ -2,13 +2,19 @@
 <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:node="remove"/>
 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove"/>
 <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove"/>
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE" tools:node="remove"/>
 
 <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
 <uses-feature android:name="android.hardware.camera" android:required="false"/>
 <uses-permission android:name="android.permission.CAMERA"/>
 <!-- Video sound: the camera's own USB mic when Android lists it, else the phone's. Asked at the first recording. -->
 <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+<!-- Background capture: a video or time-lapse goes on in CaptureService, a foreground service of type camera (+ microphone for
+     video sound) started at the record tap, with a partial wake lock and an ongoing notification (asked for on Android 13+). -->
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+<uses-permission android:name="android.permission.WAKE_LOCK"/>
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 <!-- largeHeap: a 4K photo briefly allocates about 100 MB (GL readback, its byte[] copy, the Bitmap, the JPEG); UVCAndroid issues #52/#53 report OOM on large or rapid captures. -->
 <application android:label="USB Camera Lab" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:supportsRtl="true" android:largeHeap="true">
 <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode">
@@ -17,4 +23,5 @@
 <intent-filter><action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/></intent-filter>
 <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" android:resource="@xml/usb_camera_filter"/>
 </activity>
+<service android:name=".CaptureService" android:exported="false" android:foregroundServiceType="camera|microphone"/>
 </application></manifest>

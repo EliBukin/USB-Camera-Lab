@@ -26,12 +26,19 @@ cover with one dim status line (tap or Back wakes it; the phone's brightness set
 menu also offers "Lock exposure / WB / focus": at the start the camera's auto exposure, white balance and focus are
 switched off, so it holds what it had chosen, and when the run ends the app offers to turn them back on.
 A time-lapse stops and saves like video, and also below 10 % battery (a warning at 20 %; not while charging).
-Capture ends when the app leaves the screen (Home, screen off, another app): there is no background capture yet.
+Background: a video or time-lapse goes on when the app leaves the screen (Home, screen off, lock, another app in front).
+The record tap starts a foreground service (type camera, plus microphone for a video with sound) that keeps the process
+running, holds a partial wake lock, and shows an ongoing notification: "Time-lapse · frame 154 · every 5 s · 12:50" or
+"Recording · 01:23 · 145 MB" with the sound source. Its Stop finishes and saves the file and removes the notification; a
+tap opens the app, where the preview, progress and controls come back with no reconnect. A run that stops by itself while
+the app is away (unplug, battery, storage, heat, an error) saves what it has and leaves a notification saying why. When a
+run ends while the app is away, the camera closes and the service stops. Android 13+ asks for notifications at the first
+video or time-lapse. Samsung: set the app's Battery to "Unrestricted" for long screen-off runs.
 Hints: VIDEO with a stream above 1080p (4K decodes at ~11 fps on the A20) or under 24 fps offers a one-tap switch to
 1080p; TIME-LAPSE offers the largest size within 1080p at the lowest frame rate the camera has (here 1920 × 1080 YUYV
 5 fps: about a quarter less battery current than MJPEG 30 fps). Nothing switches by itself.
 No internet permission.
-The camera stops when the app leaves the screen or is unplugged, and reconnects on return or plug-in.
+With nothing recording, the camera stops when the app leaves the screen or is unplugged, and reconnects on return or plug-in.
 On plug-in Android offers to open USB Camera Lab for the camera; "always" skips the access prompt next time.
 A Try again button appears only after access is declined or the camera fails.
 Rotation keeps the stream running (the activity handles configuration changes; landscape puts controls beside the preview).

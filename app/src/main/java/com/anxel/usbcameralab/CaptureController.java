@@ -19,7 +19,7 @@ import com.serenegiant.usb.Size;
 // time-lapse interval survive restarts.
 final class CaptureController {
     enum Mode { PHOTO, VIDEO, TIMELAPSE }
-    static final String APP_STOPPED="app stopped"; // onCameraGone reason when the app leaves the screen
+    static final String APP_STOPPED="app stopped"; // onCameraGone reason when the app leaves the screen with no background service
     static final String PREFS="capture"; // also holds CaptureBar's settings
     interface Listener {
         void captureChanged();                          // mode(), canShoot(), isBusy() or recording() changed
@@ -122,6 +122,8 @@ final class CaptureController {
         }
         listener.captureChanged();
     }
+    // Stops the run from outside the bar (the notification's Stop), as the shutter would.
+    void stop() { if(!recording()) return; stopRun(null); listener.captureChanged(); }
     private void stopRun(String reason) {
         if(stopping) return;
         if(video!=null) video.stop(reason); else if(timelapse!=null) timelapse.stop(reason); else return;

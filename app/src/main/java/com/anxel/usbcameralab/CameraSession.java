@@ -2,7 +2,9 @@ package com.anxel.usbcameralab;
 
 import android.Manifest;
 import android.app.Application;
+import android.app.Notification;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -16,6 +18,7 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.text.format.Formatter;
 import android.view.Surface;
 import com.herohan.uvcapp.*;
 import com.serenegiant.usb.*;
@@ -27,8 +30,11 @@ import java.util.Locale;
 
 // The camera session, one per process: the CameraHelper and its events, the connection state machine, the stream mode and its
 // trial, and the capture on top (CaptureController and its recorders). MainActivity attaches while it is on screen: it renders
-// the session, adds its preview surface, and builds the controls panel on the session's camera. Leaving the screen closes the
-// camera. Main thread only.
+// the session, adds its preview surface, and builds the controls panel on the session's camera.
+// Nothing capturing: leaving the screen closes the camera, as before. A video or time-lapse starts CaptureService at the record
+// tap (a foreground service, so the process keeps running with the screen off or another app in front); leaving the screen then
+// only takes the preview surface away, and the renderer goes on feeding the encoder. A screen that comes back finds the camera
+// open and the run going on. When the run ends while the app is away, the camera closes and the service stops. Main thread only.
 final class CameraSession implements CaptureController.Listener {
     // The camera connects by itself while the app is on screen (on attach, and when a camera is plugged in) and stops when
     // the app leaves the screen or the camera is unplugged. After a failure the user decides: Try again, or replug.
@@ -84,10 +90,18 @@ final class CameraSession implements CaptureController.Listener {
     private long probeStart;
     private Size trying, fellBack;
     private boolean pick, wayBack;
-    // The newest file, for the thumbnail of a screen that attaches later.
+    // What the capture bar has shown, for a screen that attaches later: the newest file, and the run's progress and sound.
     private Uri last;
     private boolean lastVideo;
     private Bitmap lastThumb;
+    private String sound, warning;
+    private int frames;
+    private long runMs, runBytes;
+    // The foreground service of the run: asked for at the record tap, `service` once it is in the foreground.
+    private static final long NOTIFY_MS=5000; // between progress updates of its notification
+    private boolean serviceAsked;
+    private CaptureService service;
+    private long notifiedAt;
 
     static CameraSession get(Context context) {
         if(instance==null) instance=new CameraSession((Application)context.getApplicationContext());
@@ -106,11 +120,19 @@ final class CameraSession implements CaptureController.Listener {
     UsbDevice selected() { return selected; }
     CameraHelper helper() { return helper; } // non-null while OPEN
 
-    // MainActivity.onStart: a new helper, and the camera connects.
+    // MainActivity.onStart. A run that went on while the app was away kept the camera open: the screen takes it as it is, with
+    // the run's progress. Otherwise a new helper, and the camera connects as before.
     void attach(Ui screen,CaptureController.Listener captureBar) {
         ui=screen; bar=captureBar;
         if(last!=null) bar.lastSaved(last,lastVideo,lastThumb);
         ui.stateChanged(state); ui.status(statusText); hideAction();
+        if(state==State.OPEN) {
+            android.util.Log.i("UsbCameraLab","session: back on screen, camera open"+(capture.recording()?", "+run()+" going on":""));
+            ui.opened(); bar.captureChanged();
+            if(capture.timelapseRunning()) bar.timelapseProgress(frames,runMs); else if(capture.recording()) bar.recordingProgress(runMs,runBytes);
+            if(sound!=null) bar.soundSource(sound);
+            return;
+        }
         if(helper==null) {
             helper=new CameraHelper(); helper.setStateCallback(new Events(helper));
             // Applies to every openCamera of this helper. No library AudioRecord: it would open one at each camera open once the
@@ -121,11 +143,16 @@ final class CameraSession implements CaptureController.Listener {
         waitForUser=false; fellBack=null;
         connect(); // a camera that is already plugged in; later ones arrive through onAttach
     }
-    // MainActivity.onStop: the camera closes. A run stopping because of it still tells that screen's bar how it ended
-    // (sound, toast), until the screen is destroyed.
+    // MainActivity.onStop. A run with its service goes on without the screen. Otherwise the camera closes; a run stopping
+    // because of that (no service) still tells that screen's bar how it ended (sound, toast), until the screen is destroyed.
     void detach(Ui screen) {
         if(ui!=screen) return; // a newer screen took over
         setPreview(null); ui=null;
+        if(capture.recording() && (service!=null || serviceAsked)) {
+            bar=null;
+            android.util.Log.i("UsbCameraLab","session: away, the "+run()+" goes on in the background");
+            return;
+        }
         if(!capture.recording()) bar=null;
         close();
     }
@@ -350,17 +377,83 @@ final class CameraSession implements CaptureController.Listener {
         return size+(s.fps==30?"":" "+s.fps+" fps");
     }
 
-    // ---- CaptureController.Listener: to the screen's capture bar ----
-    public void captureChanged() { if(bar!=null) bar.captureChanged(); }
+    // ---- The run's foreground service and its notification ----
+    private String run() { return capture.timelapseRunning()?"time-lapse":"recording"; }
+    // At the record tap, so the service is asked for while the app is on screen. Without it, the run ends when the app leaves.
+    private void startService() {
+        if(service!=null || serviceAsked) return;
+        try { app.startService(new Intent(app,CaptureService.class)); serviceAsked=true; }
+        catch(RuntimeException e) { android.util.Log.w("UsbCameraLab","capture: no background service, the run stops when the app leaves the screen",e); }
+    }
+    void serviceStarted(CaptureService s) {
+        serviceAsked=false;
+        if(!capture.recording()) { s.finish(); return; }
+        service=s; notifiedAt=SystemClock.elapsedRealtime();
+        android.util.Log.i("UsbCameraLab","capture: foreground service started"+(recordsSound()?" (camera, microphone)":" (camera)"));
+    }
+    // It couldn't go foreground. Still on screen: the run goes on until the app leaves, as without a service.
+    void serviceFailed() { serviceAsked=false; if(ui==null) close(); }
+    void serviceGone(CaptureService s) {
+        if(service!=s) return;
+        service=null; // only without finish(): Android stopped it
+        android.util.Log.w("UsbCameraLab","capture: the foreground service ended before the run");
+        if(ui==null) close();
+    }
+    private void endService() {
+        serviceAsked=false; // a service still on its way finds no run and stops
+        if(service!=null) { service.finish(); service=null; }
+    }
+    void stopFromNotification() { android.util.Log.i("UsbCameraLab","capture: Stop from the notification"); capture.stop(); }
+    // A video with sound needs the microphone type too: Android 11+ silences a background mic without it, and 14+ refuses
+    // the type without RECORD_AUDIO.
+    boolean recordsSound() { return capture.recording() && !capture.timelapseRunning() && app.checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED; }
+    // "Time-lapse · frame 154 · every 5 s · 12:50" over "0:05 of video", "Recording · 01:23 · 145 MB" over "Sound: phone mic",
+    // "Saving the video…" once it stops. null when no run is going on.
+    Notification runNotification() {
+        if(!capture.recording()) return null;
+        boolean lapse=capture.timelapseRunning(), saving=!capture.canShoot();
+        String title, text;
+        if(saving) { title=lapse?"Saving the time-lapse…":"Saving the video…"; text=null; }
+        else if(lapse) { title="Time-lapse · frame "+frames+" · every "+TimelapseRecorder.every(capture.interval())+" · "+CaptureBar.clock(runMs); text=TimelapseRecorder.length(frames)+" of video"; }
+        else { title="Recording · "+CaptureBar.clock(runMs)+" · "+Formatter.formatShortFileSize(app,runBytes); text=sound==null?null:"Sound: "+sound; }
+        if(warning!=null && !saving) text=text==null?warning:text+" · "+warning;
+        return CaptureService.running(app,title,text,!saving);
+    }
+    // Progress at most every NOTIFY_MS; a change of state (saving, a warning) at once.
+    private void notifyRun(boolean now) {
+        if(service==null) return;
+        long t=SystemClock.elapsedRealtime();
+        if(!now && t-notifiedAt<NOTIFY_MS) return;
+        Notification n=runNotification(); if(n==null) return;
+        notifiedAt=t; service.update(n);
+    }
+
+    // ---- CaptureController.Listener: to the screen's capture bar and the run's notification ----
+    public void captureChanged() { if(bar!=null) bar.captureChanged(); notifyRun(true); }
     public void shutterFired() { if(bar!=null) bar.shutterFired(); }
-    public void recordingStarting() { if(bar!=null) bar.recordingStarting(); }
-    public void recordingProgress(long ms,long bytes) { if(bar!=null) bar.recordingProgress(ms,bytes); }
-    public void timelapseProgress(int n,long ms) { if(bar!=null) bar.timelapseProgress(n,ms); }
-    public void captureWarning(String message) { if(bar!=null) bar.captureWarning(message); }
-    public void soundSource(String source) { if(bar!=null) bar.soundSource(source); }
+    public void recordingStarting() {
+        sound=warning=null; frames=0; runMs=runBytes=0;
+        if(bar!=null) bar.recordingStarting();
+        CaptureService.clearResult(app); startService();
+    }
+    public void recordingProgress(long ms,long bytes) { runMs=ms; runBytes=bytes; if(bar!=null) bar.recordingProgress(ms,bytes); notifyRun(false); }
+    public void timelapseProgress(int n,long ms) { frames=n; runMs=ms; if(bar!=null) bar.timelapseProgress(n,ms); notifyRun(false); }
+    public void captureWarning(String message) { warning=message; if(bar!=null) bar.captureWarning(message); else android.util.Log.w("UsbCameraLab",message); notifyRun(true); }
+    public void soundSource(String source) { sound=source; if(bar!=null) bar.soundSource(source); notifyRun(false); }
+    // While the app is away: a run that stopped by itself leaves a notification saying why, the service stops and the camera
+    // closes (after the controller's own updates). Stopped from the notification, nothing is left.
     public void recordingEnded(String note) {
+        boolean away=ui==null;
+        if(away) android.util.Log.i("UsbCameraLab","capture: run ended while away"+(note==null?" (stopped)":": "+note));
+        sound=warning=null;
         if(bar!=null) bar.recordingEnded(note);
-        if(ui==null) bar=null; // the screen left while the run stopped: that was the last it needed
+        if(away) bar=null; // the screen left while the run stopped: that was the last it needed
+        if(away && service!=null && note!=null) CaptureService.result(app,note);
+        if(!away) { endService(); return; }
+        later.post(() -> {
+            if(ui==null && !capture.recording()) { if(helper!=null) android.util.Log.i("UsbCameraLab","session: closing the camera, the app is away"); close(); }
+            endService();
+        });
     }
     public void lastSaved(Uri uri,boolean video,Bitmap thumb) { last=uri; lastVideo=video; lastThumb=thumb; if(bar!=null) bar.lastSaved(uri,video,thumb); }
     public void captureFailed(String message) { if(bar!=null) bar.captureFailed(message); }

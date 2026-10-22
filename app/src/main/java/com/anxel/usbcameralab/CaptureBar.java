@@ -16,6 +16,7 @@ import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.media.MediaActionSound;
 import android.net.Uri;
+import android.os.Build;
 import android.text.SpannableString;
 import android.text.format.Formatter;
 import android.text.style.ForegroundColorSpan;
@@ -36,7 +37,8 @@ import java.util.Locale;
 // size or the time-lapse interval. Portrait: the switch in a strip above a row of thumbnail, shutter and size. Landscape: a column
 // along the end edge, where a 16:9 image leaves black bars at the sides in full screen. It also draws the shutter flash (`flash`
 // covers the preview box under `bar`), the recording status and camera-mode hint (`info`, at the top of the preview box) and the
-// dimmed screen (`dim`, over the whole window), plays the capture sounds, and asks for the microphone at the first recording.
+// dimmed screen (`dim`, over the whole window), plays the capture sounds, and asks for the microphone at the first recording and,
+// on Android 13+, for notifications at the first video or time-lapse.
 @SuppressLint("SetTextI18n") // English-only UI built in code, as in MainActivity
 final class CaptureBar implements CaptureController.Listener {
     // What CaptureBar needs from the camera side of MainActivity.
@@ -52,7 +54,7 @@ final class CaptureBar implements CaptureController.Listener {
         final String text,action; final Runnable apply;
         Hint(String text,String action,Runnable apply) { this.text=text; this.action=action; this.apply=apply; }
     }
-    static final int MIC_REQUEST=2; // MainActivity forwards this permission result to micAnswered
+    static final int MIC_REQUEST=2, NOTIFY_REQUEST=3; // MainActivity forwards these permission results to micAnswered, notifyAnswered
     private static final int RED=0xffe53935, MUTED=0xffc8d2da, ACCENT=0xff7fc4e0;
     private static final float DIM=0.01f; // window brightness while dimmed; the device setting is untouched
     final FrameLayout bar,dim;
@@ -161,6 +163,7 @@ final class CaptureBar implements CaptureController.Listener {
     private void press() {
         if(controller==null) return;
         boolean idle=!controller.recording() && controller.canShoot();
+        if(controller.mode()!=CaptureController.Mode.PHOTO && idle && askNotifications()) return;
         if(controller.mode()==CaptureController.Mode.VIDEO && idle && askMic()) return;
         if(controller.mode()==CaptureController.Mode.TIMELAPSE && idle && lock && host.canLock()) host.lockAuto();
         controller.shutter();
@@ -177,6 +180,19 @@ final class CaptureBar implements CaptureController.Listener {
         if(results.length==0) { prefs.edit().putBoolean("micAsked",false).apply(); return; } // interrupted: ask next time
         if(results[0]!=PackageManager.PERMISSION_GRANTED) Toast.makeText(activity,"Recording without sound. To record sound, allow the microphone in the app's settings.",Toast.LENGTH_LONG).show();
         if(controller!=null && controller.mode()==CaptureController.Mode.VIDEO && !controller.recording()) controller.shutter();
+    }
+    // Android 13+: the notification that shows a video or time-lapse going on while the app is away needs a permission. Asked once,
+    // at the first one, which starts with the answer either way: without it the run still goes on in the background, unseen.
+    private boolean askNotifications() {
+        if(Build.VERSION.SDK_INT<33 || activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED) return false;
+        if(prefs.getBoolean("notifyAsked",false)) return false;
+        prefs.edit().putBoolean("notifyAsked",true).apply();
+        activity.requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},NOTIFY_REQUEST);
+        return true;
+    }
+    void notifyAnswered(int[] results) {
+        if(results.length==0) { prefs.edit().putBoolean("notifyAsked",false).apply(); return; } // interrupted: ask next time
+        if(controller!=null && !controller.recording()) press(); // the microphone may be asked next
     }
     // The interval presets, each with what an hour becomes, and the exposure lock.
     private void chooseInterval() {
@@ -309,7 +325,7 @@ final class CaptureBar implements CaptureController.Listener {
         catch(ActivityNotFoundException e) { Toast.makeText(activity,lastVideo?"No app here can play videos":"No app here can show photos",Toast.LENGTH_LONG).show(); }
     }
 
-    private static String clock(long ms) {
+    static String clock(long ms) {
         long s=ms/1000;
         return s>=3600?String.format(Locale.US,"%d:%02d:%02d",s/3600,s/60%60,s%60):String.format(Locale.US,"%02d:%02d",s/60,s%60);
     }
