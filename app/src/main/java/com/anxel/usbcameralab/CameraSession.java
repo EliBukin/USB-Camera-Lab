@@ -257,9 +257,11 @@ final class CameraSession implements CaptureController.Listener {
             if(ours || (state==State.IDLE && video(d))) { waitForUser=false; hideAction(); say("Camera unplugged. Plug it back in to continue."); }
         }
         public void onCancel(UsbDevice d) { if(!stale() && state==State.CONNECTING) { setState(State.IDLE); needUser("USB access to the camera was not allowed."); } }
+        // A failed openCamera leaves the USB device open (UVCAndroid keeps its control block), so deviceOpen stays as
+        // onDeviceOpen set it: a retry reopens with openCamera(), not selectDevice(), which would duplicate the callbacks.
         public void onError(UsbDevice d,CameraException e) {
             android.util.Log.e("UsbCameraLab","Camera error",e);
-            if(!stale() && state!=State.IDLE) { deviceOpen=false; setState(State.IDLE); lost("Couldn't open the camera. Try again, or unplug it and plug it back in."); }
+            if(!stale() && state!=State.IDLE) { setState(State.IDLE); lost("Couldn't open the camera. Try again, or unplug it and plug it back in."); }
         }
     }
     private void closing(String message) {
