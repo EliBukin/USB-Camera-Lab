@@ -212,9 +212,11 @@ public class MainActivity extends AppCompatActivity {
             home.runBanner.show(this,0,R.drawable.ic_lock,"Camera mode is locked while the "+(lapse?"time-lapse runs":"video records")+". Controls stay live.","Go to "+(lapse?"Time-lapse":"Video"),() -> selectTab(tabFor(capture.mode()),true));
         } else home.runBanner.hide();
     }
+    // The picture's buffers are the stream's size up to 1080p, above that scaled into 1920 × 1080 like a video: the screen shows
+    // no more, and 4K buffers cost about 85 MB more graphics memory. Photos render the stream at full size on their own.
     private void showMode() {
         Size mode=session.mode();
-        if(mode!=null) { preview.setAspect((double)mode.width/mode.height); preview.surface.getHolder().setFixedSize(mode.width,mode.height); shell.requestLayout(); }
+        if(mode!=null) { preview.setAspect((double)mode.width/mode.height); int[] b=VideoRecorder.fit(mode.width,mode.height); preview.surface.getHolder().setFixedSize(b[0],b[1]); shell.requestLayout(); }
         homeMode.update(); if(sheetMode!=null) sheetMode.update();
         captureBar.captureChanged(); // the hints and sizes follow the mode
         render();
