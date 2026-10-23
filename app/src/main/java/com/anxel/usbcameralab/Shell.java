@@ -24,8 +24,6 @@ final class Shell extends ViewGroup {
     boolean landscape, fullScreen, capture, sheetOpen;
     Insets insets=Insets.NONE;      // system bars and display cutout
     private final int barHeight, columnWidth, sheetWidth;
-    // Where the last layout put things, for the views that need it (the sheet's height, the snackbar's room).
-    int pictureBottom;
 
     Shell(Context c,PreviewHost preview,View panels,View bar,View nav,View rail,View snack,View sheet) {
         super(c);
@@ -49,7 +47,6 @@ final class Shell extends ViewGroup {
             preview.setReserve(capture && landscape?columnWidth:0);
             place(preview.box,0,0,w,h,measure);
             if(capture) { if(landscape) place(bar,w-columnWidth,0,w,h,measure); else place(bar,0,h-barHeight,w,h,measure); }
-            pictureBottom=h;
             place(snack,0,0,w,capture && !landscape?h-barHeight:h,measure);
             place(sheet,0,0,0,0,measure);
             return;
@@ -60,7 +57,7 @@ final class Shell extends ViewGroup {
             int previewHeight=(int)Math.min(Math.round(width/preview.box.aspect),(h-top-navHeight)*0.6);
             preview.setReserve(0);
             place(preview.box,in.left,top,in.left+width,top+previewHeight,measure);
-            pictureBottom=top+previewHeight;
+            int pictureBottom=top+previewHeight;
             int foot=h-navHeight;
             place(nav,0,foot,w,h,measure);
             if(capture) place(bar,in.left,foot-barHeight,w-in.right,foot,measure);
@@ -79,7 +76,6 @@ final class Shell extends ViewGroup {
             place(panels,x1-right,y0,x1,y1,measure);
             place(snack,x1-right,y0,x1,y1,measure);
             place(sheet,0,0,0,0,measure);
-            pictureBottom=y1;
             return;
         }
         int side=Math.min(sheetWidth,(x1-x0)/2);
@@ -88,7 +84,6 @@ final class Shell extends ViewGroup {
         place(bar,x1-columnWidth,y0,x1,y1,measure);
         place(sheet,x1-side,y0,x1,y1,measure);
         place(snack,x0,y0,(sheetOpen?x1-side:x1-columnWidth),y1,measure);
-        pictureBottom=y1;
     }
     private void place(View v,int l,int t,int r,int b,boolean measure) {
         if(v.getVisibility()==GONE) return;

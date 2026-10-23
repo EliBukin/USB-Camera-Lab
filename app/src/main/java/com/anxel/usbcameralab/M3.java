@@ -23,7 +23,7 @@ import com.google.android.material.color.MaterialColors;
 // styles, icons, cards, banners and the pills that sit on the picture. Colours come from the theme (themes.xml); the few
 // with no Material role are here.
 final class M3 {
-    static final int REC=0xffe53935, REC_TEXT=0xffff5a52, OK=0xff7bd88f;          // recording red, its text on dark, "camera open" green
+    static final int REC=0xffe53935, OK=0xff7bd88f;                                // recording red, "camera open" green
     static final int WARN=0xff4f3b00, ON_WARN=0xffffdf9e, WARN_ACTION=0xffffd277; // battery and heat warnings
     static final int PILL=0x94000000, PILL_RED=0xd1a01410;                         // backings for text on the picture
     private M3() {}
