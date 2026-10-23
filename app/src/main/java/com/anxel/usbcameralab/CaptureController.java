@@ -67,9 +67,10 @@ final class CaptureController {
     Mode mode() { return mode; }
     int interval() { return interval; }
     // In VIDEO and TIMELAPSE mode the shutter starts a run and stops it again; it is off while the file is being finished.
+    // A run needs the stream size: CameraSession may report OPEN without one when the camera closed under its open.
     boolean canShoot() {
         if(video!=null || timelapse!=null) return !stopping;
-        return helper!=null && shot==null;
+        return helper!=null && stream!=null && shot==null;
     }
     boolean isBusy() { return shot!=null || video!=null || timelapse!=null; }
     boolean recording() { return video!=null || timelapse!=null; }
