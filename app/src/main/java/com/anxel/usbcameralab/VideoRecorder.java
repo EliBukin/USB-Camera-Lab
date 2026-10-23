@@ -4,6 +4,8 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Build;
@@ -18,6 +20,7 @@ import android.view.Surface;
 import com.herohan.uvcapp.CameraHelper;
 import com.serenegiant.usb.Size;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -26,20 +29,23 @@ import java.util.Set;
 
 // One video. MediaRecorder takes its frames from a Surface that the library's renderer draws every camera frame into, scaled on
 // the GPU to the recorder's size, and writes an MP4 into a pending MediaStore row: published when the file is finished, deleted
-// when no frame arrived. Not the library's startRecording: it encodes at the stream size (4K fails on the A20) and leaks its
-// encoders. MediaRecorder runs on the recording's own thread; Events arrive on main. No Activity, so it can move into a service.
+// when no frame arrived or a failed recorder left nothing that plays. Not the library's startRecording: it encodes at the stream
+// size (4K fails on the A20) and leaks its encoders. MediaRecorder runs on the recording's own thread; Events arrive on main. No
+// Activity, so it can move into a service.
 final class VideoRecorder {
     interface Events {
         void progress(VideoRecorder r,long ms,long bytes);  // about once a second
         void sound(VideoRecorder r,String source);          // "camera mic", "phone mic", … or "off (why)"
         // Exactly once. saved is null when nothing was kept; why is the error then, else why recording stopped (null: stop()).
-        void finished(VideoRecorder r,Uri saved,Bitmap thumb,String why);
+        // cut: saved after the recorder failed, so its end may be missing.
+        void finished(VideoRecorder r,Uri saved,Bitmap thumb,String why,boolean cut);
     }
     // The A20's H.264 encoder stops at 1920 × 1088. Fitting 1080 lines gives 1920 × 1080 for 16:9 and 1440 × 1080 for 4:3.
     static final int MAX_WIDTH=1920, MAX_HEIGHT=1080;
     static final long MIN_FREE=500_000_000L; // bytes; time-lapse uses it too
     private static final long TICK_MS=1000;
     private static final int SPACE_EVERY=5; // ticks between free-space checks
+    private static final long NO_FRAMES_MS=2000; // a stop that fails sooner: no frame had arrived yet
     // USB mics that sent only exact zeros this run. A working mic always has a noise floor; zeros mean the device sends nothing,
     // e.g. muted in its own controls, which Android never changes. The A20 lists, routes and reads the XC-TECH camera's mic and
     // gets only zeros, so its recordings switch to the phone's mic after SILENT_TICKS, and later ones start there.
@@ -110,7 +116,7 @@ final class VideoRecorder {
             work.postDelayed(tick,TICK_MS);
         } catch(IOException|RuntimeException|ErrnoException e) {
             android.util.Log.w("UsbCameraLab","video: couldn't start",e);
-            drop(); finish(null,"couldn't start ("+e.getMessage()+")");
+            drop(); finish(null,"couldn't start ("+e.getMessage()+")",false);
         }
     }
     @SuppressWarnings("deprecation") // MediaRecorder(Context) needs API 31
@@ -199,12 +205,35 @@ final class VideoRecorder {
         if(ended) return;
         work.removeCallbacks(tick); power.removeThermalStatusListener(heat);
         long ms=SystemClock.elapsedRealtime()-startedAt;
-        String error=null;
+        String error=null; boolean cut=false;
         // Stop before removing the surface: removal paints it black, which would otherwise be the video's last frame.
-        try { recorder.stop(); } catch(RuntimeException e) { error="no video frames arrived"; } // what stop() does before the first frame
+        try { recorder.stop(); }
+        catch(RuntimeException e) { // what stop() does before the first frame; later, the encoder or the file failed
+            if(ms<NO_FRAMES_MS) error="no video frames arrived";
+            else { android.util.Log.w("UsbCameraLab","video: stop failed",e); drop(); cut=playable(ms); if(!cut) error="the recording failed"+(reason==null?"":" ("+reason+")"); }
+        }
         drop();
-        android.util.Log.i("UsbCameraLab",String.format(Locale.US,"video: stopped after %.1f s (%s)%s",ms/1000.0,reason==null?"user":reason,error==null?"":": "+error));
-        finish(reason,error);
+        android.util.Log.i("UsbCameraLab",String.format(Locale.US,"video: stopped after %.1f s (%s)%s",ms/1000.0,reason==null?"user":reason,error!=null?": "+error:cut?": stop failed, keeping the file":""));
+        finish(cut && reason==null?"the recorder failed":reason,error,cut);
+    }
+    // After a failed stop, with the recorder released: the file has a video track of a sane duration and its first frame reads.
+    // A failed stop can leave no index, or one without the video (the A20 writes the audio track alone when no frame arrived).
+    private boolean playable(long ms) {
+        MediaExtractor x=new MediaExtractor();
+        try {
+            x.setDataSource(fd.getFileDescriptor());
+            for(int i=0;i<x.getTrackCount();i++) {
+                MediaFormat f=x.getTrackFormat(i);
+                if(!String.valueOf(f.getString(MediaFormat.KEY_MIME)).startsWith("video/")) continue;
+                long us=f.getLong(MediaFormat.KEY_DURATION,0), size;
+                x.selectTrack(i); size=x.getSampleSize();
+                android.util.Log.i("UsbCameraLab",String.format(Locale.US,"video: after the failed stop the file has %.1f s of %s, first frame %d bytes",us/1e6,f.getString(MediaFormat.KEY_MIME),size));
+                return us>0 && us<=(ms+10_000)*1000 && size>0 && size<=16<<20 && x.readSampleData(ByteBuffer.allocate((int)size),0)>0;
+            }
+            android.util.Log.w("UsbCameraLab","video: after the failed stop the file has no video track ("+x.getTrackCount()+" tracks)");
+        } catch(IOException|RuntimeException e) { android.util.Log.w("UsbCameraLab","video: after the failed stop the file doesn't read",e); }
+        finally { x.release(); }
+        return false;
     }
     // Detach and free a recorder that is stopped or never started. Releasing our Surface is safe while the renderer still
     // holds it: its EGL surface keeps its own reference, and the removal posted here deletes that one.
@@ -213,7 +242,7 @@ final class VideoRecorder {
         if(recorder!=null) { recorder.release(); recorder=null; }
         if(surface!=null) { surface.release(); surface=null; }
     }
-    private void finish(String reason,String error) {
+    private void finish(String reason,String error,boolean cut) {
         ended=true;
         long bytes=fd==null?0:Math.max(0,fd.getStatSize());
         if(fd!=null) try { fd.close(); } catch(IOException e) { if(error==null) error="couldn't close the file"; }
@@ -225,7 +254,8 @@ final class VideoRecorder {
         }
         android.util.Log.i("UsbCameraLab",saved!=null?"video saved: "+bytes/1024+" KB, "+uri:"video not saved: "+error);
         Uri s=saved; Bitmap t=thumb; String why=error!=null?error:reason;
-        main.post(() -> events.finished(this,s,t,why));
+        boolean c=cut && saved!=null;
+        main.post(() -> events.finished(this,s,t,why,c));
         thread.quitSafely();
     }
 }

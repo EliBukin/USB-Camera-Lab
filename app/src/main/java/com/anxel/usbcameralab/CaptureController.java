@@ -140,11 +140,11 @@ final class CaptureController {
     private final VideoRecorder.Events recorderEvents=new VideoRecorder.Events() {
         public void progress(VideoRecorder r,long ms,long bytes) { if(r==video) listener.recordingProgress(ms,bytes); }
         public void sound(VideoRecorder r,String source) { if(r==video) listener.soundSource(source); }
-        public void finished(VideoRecorder r,Uri saved,Bitmap thumb,String why) {
+        public void finished(VideoRecorder r,Uri saved,Bitmap thumb,String why,boolean cut) {
             if(r!=video) return;
             video=null; stopping=false;
             if(saved!=null) listener.lastSaved(saved,true,thumb);
-            listener.recordingEnded(saved==null ? "Video not saved: "+why : why==null ? null : "Recording stopped: "+why+". The video is saved.");
+            listener.recordingEnded(saved==null ? "Video not saved: "+why : why==null ? null : "Recording stopped: "+why+(cut?". The video is saved, but its end may be cut short.":". The video is saved."));
             listener.captureChanged();
         }
     };
