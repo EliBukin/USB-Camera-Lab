@@ -13,8 +13,10 @@ Photos: the shutter saves a JPEG (quality 95) at the current camera mode, e.g. 3
 Pictures/USB Camera Lab as USBCam_yyyyMMdd_HHmmss.jpg through MediaStore, with no storage permission. The thumbnail
 opens the last photo or video.
 Video: the Video tab's red button records H.264 MP4 to Movies/USB Camera Lab as USBCam_yyyyMMdd_HHmmss.mp4
-(a pending MediaStore row until finished; deleted if no frame arrived). The stream is GPU-scaled into 1920 × 1080, the A20's
-encoder limit (4K → 1920 × 1080, 2592 × 1944 → 1440 × 1080), at the stream's frame rate, ~0.2 bit per pixel per frame.
+(a pending MediaStore row until finished; deleted if no frame arrived). If the recorder fails later in a recording, the file
+is kept when it still plays, and the message says its end may be cut short; otherwise it is deleted and the message says why.
+The stream is GPU-scaled into 1920 × 1080, the A20's encoder limit (4K → 1920 × 1080, 2592 × 1944 → 1440 × 1080), at the
+stream's frame rate, ~0.2 bit per pixel per frame.
 Sound: the microphone permission is asked at the first recording (denied: silent videos, and the recording says so).
 The camera's own USB mic is used when Android lists it, else the phone's; a USB mic that sends only silence for 2 s is
 swapped for the phone's mic (the XC-TECH camera's mic does that on the A20). AAC 48 kHz 128 kbps.
@@ -59,5 +61,5 @@ Camera mode (format, frame size, frame rate) is picked on Home (or from the chip
 is MJPEG 1920 × 1080 (or the largest MJPEG size up to 1080p) at up to 30 fps. Switching restarts only the stream.
 Tap the picture for full screen (system bars hidden, the capture tab's shutter stays); tap again or Back to return.
 Messages are snackbars ("Video saved · View").
-Uses Apache-2.0 UVCAndroid 1.0.13: https://github.com/shiyinghan/UVCAndroid
+License: MIT (see LICENSE). Uses Apache-2.0 UVCAndroid 1.0.13: https://github.com/shiyinghan/UVCAndroid
 Android 10+ (minSdk 29), development target SDK 34; this prototype is not a Play Store release.
